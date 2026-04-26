@@ -1,0 +1,23 @@
+# Build output
+out/
+dist/
+*.vsix
+
+# Dependencies
+node_modules/
+
+# Testing
+.vscode-test/
+coverage/
+.nyc_output/
+
+# Environment
+.env
+.env.local
+
+# DevGhost runtime
+.devghost/
+
+# OS
+.DS_Store
+Thumbs.db

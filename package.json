@@ -1,0 +1,128 @@
+{
+  "name": "devghost",
+  "displayName": "DevGhost",
+  "description": "A quiet build-in-public companion that watches real coding activity and suggests drafts for review.",
+  "version": "3.3.2",
+  "publisher": "devghost",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/devghost/devghost"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "icon": "images/icon.png",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "DevGhost",
+      "properties": {
+        "devghost.model": {
+          "type": "string",
+          "default": "auto",
+          "description": "The AI model to use for drafting. Leave as 'auto' to let DevGhost choose a compatible model for your key.",
+          "enum": [
+            "auto",
+            "gemini-2.5-flash",
+            "gemini-2.0-flash",
+            "gemini-1.5-flash"
+          ],
+          "enumDescriptions": [
+            "Recommended - Automatically selects the best compatible model for your key",
+            "Latest model",
+            "Stable model",
+            "Lower-cost model"
+          ]
+        },
+        "devghost.deepWorkMinutes": {
+          "type": "number",
+          "default": 90,
+          "minimum": 15,
+          "description": "Minutes of active coding before DevGhost considers a session deep work."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "devghost.initialize",
+        "title": "DevGhost: Set Up Project"
+      },
+      {
+        "command": "devghost.setFocus",
+        "title": "DevGhost: Set Current Focus"
+      },
+      {
+        "command": "devghost.iWon",
+        "title": "DevGhost: Draft a Win"
+      },
+      {
+        "command": "devghost.showLogs",
+        "title": "DevGhost: Show Logs"
+      },
+      {
+        "command": "devghost.setApiKey",
+        "title": "DevGhost: Add AI Key"
+      },
+      {
+        "command": "devghost.clearApiKey",
+        "title": "DevGhost: Clear AI Key"
+      },
+      {
+        "command": "devghost.pause",
+        "title": "DevGhost: Pause"
+      },
+      {
+        "command": "devghost.resume",
+        "title": "DevGhost: Resume"
+      },
+      {
+        "command": "devghost.resetProjectContext",
+        "title": "DevGhost: Reset Project Context"
+      },
+      {
+        "command": "devghost.resetRecentActivity",
+        "title": "DevGhost: Reset Recent Activity"
+      },
+      {
+        "command": "devghost.shareGrind",
+        "title": "DevGhost: Draft From Recent Work"
+      },
+      {
+        "command": "devghost.checkAiConnection",
+        "title": "DevGhost: Check AI Setup"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "clean": "powershell -Command \"if (Test-Path out) { Remove-Item -Path out -Recurse -Force }\"",
+    "package": "npm run clean && npm run compile && npx @vscode/vsce package",
+    "release": "node scripts/release-and-install.js",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts",
+    "test": "node ./out/test/runTest.js"
+  },
+  "devDependencies": {
+    "@types/node": "18.x",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.15.0",
+    "@typescript-eslint/parser": "^6.15.0",
+    "eslint": "^8.56.0",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "shiki": "^1.29.2"
+  },
+  "optionalDependencies": {
+    "canvas": "^2.11.2"
+  }
+}
