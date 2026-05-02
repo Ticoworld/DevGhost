@@ -393,15 +393,14 @@ RAW DATA (use for context, NOT for output):
 - Struggle duration (minutes): ${duration}
 - Failed attempts: ${failureCount}
 
-CRITICAL: NEVER echo exact numbers. Use human time ("an hour" not "61 mins"). Use "a few" not "3". Sound like a tired dev texting a friend.
+CRITICAL: NEVER echo exact numbers. Use human time ("an hour" not "61 mins"). Use "a few" not "3". Write like a developer casually explaining what happened.
 
 TONE: ${toneGuide}
 
 RULES:
-- Be authentic, not corporate
-- Show the struggle was real
-- Celebrate the win
-- Include #BuildInPublic
+- Be specific and authentic
+- Briefly mention the struggle without drama
+- Focus on the technical reality
 - Under 280 characters!
 
 Write the draft:`;
@@ -432,7 +431,7 @@ Write the draft:`;
         const toneGuide = this.getToneGuide(context.tone);
         
         const prompt = `
-Write a bold build-in-public draft (under 280 chars) about a major project pivot.
+Write a build-in-public draft (under 280 chars) about a project pivot or refactor.
 
 RAW DATA (use for context, NOT for output):
 - Project: ${context.projectName}
@@ -441,16 +440,15 @@ RAW DATA (use for context, NOT for output):
 - Lines added: ${stats.additions}
 - Files changed: ${stats.filesChanged}
 
-CRITICAL: Don't echo exact line counts. Use "a bunch of", "a lot of", "hundreds of" - sound human, not like a diff report.
+CRITICAL: Don't echo exact line counts. Use "a bunch of", "a lot of", "hundreds of" - sound human. Write like a dev explaining a structural change.
 
 TONE: ${toneGuide}
-This is a PIVOT moment - the dev torched code and is rebuilding.
+This is a technical transition - moving from old code to new.
 
 RULES:
-- Be bold and decisive
-- Show confidence in the new direction
-- Acknowledge the destruction
-- Include #BuildInPublic
+- Explain the "why" briefly if possible
+- Acknowledge the scope of changes
+- No hype or over-excitement
 - Under 280 characters!
 
 Write the draft:`;
@@ -481,23 +479,21 @@ Write the draft:`;
         const toneGuide = this.getToneGuide(context.tone);
         
         const prompt = `
-Write a build-in-public draft (under 280 chars) about a focused coding session.
+Write a build-in-public draft (under 280 chars) about a coding session.
 
 RAW DATA (use for context, NOT for output):
 - Project: ${context.projectName}
 - Session duration (minutes): ${sessionMinutes}
 - What was built: "${commitMessage}"
 
-CRITICAL: NEVER use exact minutes ("1218 minutes", "73 mins"). Use human time: "an hour", "a few hours", "all day", "the whole weekend". Sound like a dev who just shipped.
+CRITICAL: NEVER use exact minutes. Use human time: "an hour", "a few hours", "all day". Write like a developer sharing progress.
 
 TONE: ${toneGuide}
-This is a DEEP WORK moment - focused coding leading to a commit.
 
 RULES:
-- Celebrate the focus
+- Be specific about what was worked on
 - Mention time in human terms
-- Reference what was built
-- Include #BuildInPublic
+- No motivational hype
 - Under 280 characters!
 
 Write the draft:`;
@@ -736,6 +732,23 @@ Write the draft:`;
         if ((cleaned.startsWith('"') && cleaned.endsWith('"')) ||
             (cleaned.startsWith("'") && cleaned.endsWith("'"))) {
             cleaned = cleaned.slice(1, -1);
+        }
+
+        // Strip AI-ish headers
+        cleaned = cleaned.replace(/^(tweet|draft|output|here's a draft):\s*/i, '').trim();
+        
+        // Strip common AI-ish hype phrases
+        const hypePhrases = [
+            /excited to announce/i,
+            /love those moments/i,
+            /hyper-focused moments/i,
+            /sank into deep work/i,
+            /love those hyper-focused moments/i,
+            /just shipped/i
+        ];
+        
+        for (const phrase of hypePhrases) {
+            cleaned = cleaned.replace(phrase, '').trim();
         }
 
         // Truncate if over 280 chars

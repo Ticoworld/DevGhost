@@ -259,6 +259,7 @@ type AutomaticDraftGateOptions = {
         successCommand?: string;
         durationMinutes?: number;
         strugglesCount?: number;
+        commitAnalysis?: CommitAnalysis;
     };
 };
 
@@ -1323,6 +1324,7 @@ async function handleCommitDetected(analysis: CommitAnalysis): Promise<void> {
         trigger: 'COMMIT_DETECTED',
         eventKey,
         label: 'Commit draft',
+        hints: { commitAnalysis: analysis }
     })) {
         return;
     }
@@ -1332,24 +1334,24 @@ async function handleCommitDetected(analysis: CommitAnalysis): Promise<void> {
         eventKey,
         label: 'Commit draft',
         createDraft: async () => {
-            if (!geminiService?.isInitialized()) return null;
+            if (!agenticBrain) return null;
             
-            const config = contextManager?.getConfig();
-            const context = {
-                projectName: config?.projectName || 'my project',
-                mission: config?.mission,
-                currentFocus: config?.currentFocus,
-                tone: (config?.tone || 'raw') as any,
-            };
+            const baseline = contextManager?.getBaselineSummary() || '(no project context)';
             
-            if (analysis.isPivot) {
-                return await geminiService.generatePivotPost(context, analysis, analysis.message);
-            } else if (analysis.isDeepWork) {
-                return await geminiService.generateDeepWorkPost(context, analysis.sessionMinutes, analysis.message);
-            } else {
-                // Generic but context-aware commit draft
-                return await geminiService.generateDeepWorkPost(context, analysis.sessionMinutes, analysis.message);
-            }
+            // Build the story context
+            const result = await agenticBrain.process_trigger('COMMIT_DETECTED', {
+                baselineSummary: baseline,
+                commitMessage: analysis.message,
+                changedFiles: analysis.changedFiles,
+                additions: analysis.additions,
+                deletions: analysis.deletions,
+                workType: analysis.workType || 'refactor',
+                sessionMinutes: analysis.sessionMinutes,
+                diffStat: analysis.diffStat,
+                terminalFriction: sessionManager?.getRecentFrictionSummary() || undefined
+            });
+
+            return result.ok ? result.tweet : null;
         }
     });
 }

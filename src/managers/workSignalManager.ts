@@ -26,6 +26,7 @@ export interface AutomaticDraftHints {
     successCommand?: string;
     durationMinutes?: number;
     strugglesCount?: number;
+    commitAnalysis?: CommitAnalysis;
 }
 
 export interface AutomaticDraftInput {
@@ -351,7 +352,7 @@ export class WorkSignalManager {
 
     evaluateAutomaticDraft(input: AutomaticDraftInput): AutomaticDraftDecision {
         const now = Date.now();
-        const snapshot = this.buildSnapshot(now, input.focusAgeMinutes, input.sessionMinutes, input.workspaceRoot);
+        const snapshot = this.buildSnapshot(now, input.focusAgeMinutes, input.sessionMinutes, input.workspaceRoot, input.hints);
 
         const reasons: string[] = [];
         const blockers: string[] = [];
@@ -374,11 +375,11 @@ export class WorkSignalManager {
             blockers.push(`auto draft cooldown active (${recentAutoSuggestionMinutes}m since last suggestion)`);
         }
 
-        if (snapshot.onlyNoiseFilesChanged) {
+        if (snapshot.onlyNoiseFilesChanged && input.trigger !== 'COMMIT_DETECTED') {
             blockers.push('only generated, lock, or build output files changed');
         }
 
-        if (snapshot.likelyMassiveBurst && !snapshot.burstHasStabilitySignal) {
+        if (snapshot.likelyMassiveBurst && !snapshot.burstHasStabilitySignal && input.trigger !== 'COMMIT_DETECTED') {
             blockers.push('recent burst is not stable yet');
         }
 
@@ -395,9 +396,27 @@ export class WorkSignalManager {
             reasons.push('build, test, or package passed +50');
         }
 
+        const isDocsFocused = this.isDocsFocused(input.currentFocus);
+        const commit = input.hints?.commitAnalysis;
+        const isMeaningfulCommit = commit && (
+            commit.workType === 'feature' || 
+            commit.workType === 'bugfix' || 
+            commit.workType === 'security' ||
+            snapshot.sourceFileCount > 0 ||
+            snapshot.configFileCount > 0
+        );
+
         if (snapshot.hasCommitSignal) {
-            score += 50;
-            reasons.push('commit created +50');
+            if (isMeaningfulCommit) {
+                score += 50;
+                reasons.push('meaningful commit evidence +50');
+            } else if (input.trigger === 'COMMIT_DETECTED') {
+                score += 15;
+                reasons.push('maintenance/docs commit +15');
+            } else {
+                score += 30;
+                reasons.push('commit signal in session +30');
+            }
         }
 
         if (snapshot.featurePathCount > 0) {
@@ -444,13 +463,18 @@ export class WorkSignalManager {
         }
 
         if (snapshot.onlyFormattingOrDocsChanged) {
-            score -= 40;
-            reasons.push('changes look like formatting or docs only -40');
+            if (isDocsFocused) {
+                score += 10;
+                reasons.push('focused docs/readme work +10');
+            } else {
+                score -= 40;
+                reasons.push(input.trigger === 'COMMIT_DETECTED' ? 'commit is docs/formatting only (not focus) -40' : 'changes look like formatting or docs only -40');
+            }
         }
 
         if (snapshot.noiseFileCount > 0 && snapshot.sourceFileCount === 0) {
-            score -= 50;
-            reasons.push('generated or lockfile noise dominates -50');
+            score -= 60;
+            reasons.push(input.trigger === 'COMMIT_DETECTED' ? 'commit is lockfile/generated noise only -60' : 'generated or lockfile noise dominates -60');
         }
 
         if (snapshot.recentAutoSuggestionMinutes !== null && snapshot.recentAutoSuggestionMinutes < 60) {
@@ -522,7 +546,7 @@ export class WorkSignalManager {
             .join('\n');
     }
 
-    private buildSnapshot(now: number, focusAgeMinutes: number, sessionMinutes: number, workspaceRoot: string): SignalSnapshot {
+    private buildSnapshot(now: number, focusAgeMinutes: number, sessionMinutes: number, workspaceRoot: string, hints?: AutomaticDraftHints): SignalSnapshot {
         const uniqueFiles = [...this.fileStats.values()];
         const uniqueFileCount = this.fileStats.size;
         const sourceFileCount = uniqueFiles.filter((file) => file.category === 'source').length;
@@ -556,7 +580,7 @@ export class WorkSignalManager {
         const hasRecoverySignal = this.burstHasRecoverySignal || recoveryCount > 0;
         const status = this.readGitStatusSummary(workspaceRoot);
 
-        return {
+        const snap: SignalSnapshot = {
             uniqueFileCount,
             sourceFileCount,
             configFileCount,
@@ -595,6 +619,53 @@ export class WorkSignalManager {
             untrackedCount: status?.untrackedCount ?? null,
             recentAutoSuggestionMinutes: this.getMinutesSinceLastAutomaticSuggestion(now),
         };
+
+        // If we have a commit analysis, augment the snapshot with its evidence
+        if (hints?.commitAnalysis) {
+            const commit = hints.commitAnalysis;
+            const commitFiles = commit.changedFiles || [];
+            
+            let commitSourceCount = 0;
+            let commitConfigCount = 0;
+            let commitDocsCount = 0;
+            let commitStyleCount = 0;
+            let commitGeneratedCount = 0;
+            let commitNoiseCount = 0;
+            let commitFeaturePathCount = 0;
+
+            for (const f of commitFiles) {
+                const cat = this.classifyFilePath(f);
+                if (cat === 'source') commitSourceCount++;
+                else if (cat === 'config') commitConfigCount++;
+                else if (cat === 'docs') commitDocsCount++;
+                else if (cat === 'style') commitStyleCount++;
+                else if (cat === 'generated') commitGeneratedCount++;
+                else commitNoiseCount++;
+
+                if (cat === 'source' && FEATURE_PATH_PATTERNS.test(f)) {
+                    commitFeaturePathCount++;
+                }
+            }
+
+            snap.sourceFileCount = Math.max(snap.sourceFileCount, commitSourceCount);
+            snap.configFileCount = Math.max(snap.configFileCount, commitConfigCount);
+            snap.docsFileCount = Math.max(snap.docsFileCount, commitDocsCount);
+            snap.styleFileCount = Math.max(snap.styleFileCount, commitStyleCount);
+            snap.generatedFileCount = Math.max(snap.generatedFileCount, commitGeneratedCount);
+            snap.noiseFileCount = Math.max(snap.noiseFileCount, commitNoiseCount);
+            snap.featurePathCount = Math.max(snap.featurePathCount, commitFeaturePathCount);
+            snap.commitCount = Math.max(snap.commitCount, 1);
+            snap.hasCommitSignal = true;
+
+            // Recalculate 'only' flags using commit evidence
+            const total = snap.sourceFileCount + snap.configFileCount + snap.docsFileCount + snap.styleFileCount + snap.generatedFileCount + snap.noiseFileCount;
+            if (total > 0) {
+                snap.onlyNoiseFilesChanged = snap.sourceFileCount === 0 && snap.configFileCount === 0 && snap.docsFileCount === 0 && snap.styleFileCount === 0 && (snap.generatedFileCount > 0 || snap.noiseFileCount > 0);
+                snap.onlyFormattingOrDocsChanged = snap.sourceFileCount === 0 && snap.generatedFileCount === 0 && snap.noiseFileCount === 0 && (snap.docsFileCount > 0 || snap.styleFileCount > 0 || snap.configFileCount > 0);
+            }
+        }
+
+        return snap;
     }
 
     private readGitStatusSummary(workspaceRoot: string): GitStatusSummary | null {
@@ -894,6 +965,16 @@ export class WorkSignalManager {
             default:
                 return 0;
         }
+    }
+
+    private isDocsFocused(focus: string): boolean {
+        const lower = focus.toLowerCase();
+        return lower.includes('doc') || 
+               lower.includes('readme') || 
+               lower.includes('changelog') || 
+               lower.includes('release') || 
+               lower.includes('testing') || 
+               lower.includes('markdown');
     }
 
     private uniqueOrdered(values: string[]): string[] {

@@ -469,6 +469,17 @@ export class SessionManager implements vscode.Disposable {
     }
 
     /**
+     * Get a summary of recent command failures (friction).
+     */
+    getRecentFrictionSummary(): string | null {
+        if (this.recentFailures.length === 0) return null;
+        return this.recentFailures
+            .slice(-5)
+            .map(f => `- ${f.command} (exit ${f.exitCode})`)
+            .join('\n');
+    }
+
+    /**
      * Clear local session signal state without touching project context.
      */
     resetTracking(): void {

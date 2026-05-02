@@ -12,10 +12,13 @@ interface CommitAnalysis {
     additions: number;
     deletions: number;
     filesChanged: number;
+    changedFiles: string[];
     isPivot: boolean;
     isDeepWork: boolean;
     repoRoot: string;
     sessionMinutes: number;
+    diffStat?: string;
+    workType?: string;
 }
 
 /**
@@ -163,31 +166,49 @@ export class GitManager implements vscode.Disposable {
         const repoRoot = this.repository.rootUri.fsPath;
 
         try {
-            // Get commit stats using git show (run in repo that has this commit)
+            // Get commit message and stats (filenames + summary line)
             const statsOutput = await this.runGitCommand(
                 repoRoot,
                 ['show', '--stat', '--format=%s', commitHash]
             );
 
-            // Parse the output
-            const lines = statsOutput.split('\n');
+            const lines = statsOutput.split('\n').map(l => l.trimEnd());
             const message = lines[0] || 'No message';
-
-            // Parse stats from the summary line (e.g., "5 files changed, 120 insertions(+), 50 deletions(-)")
+            
+            // Parse filenames from the stat lines
+            // Example line: " src/analyzer/gemini.ts | 24 ++++++++"
+            const changedFiles: string[] = [];
             let additions = 0;
             let deletions = 0;
             let filesChanged = 0;
 
-            const statsLine = lines[lines.length - 2] || '';
-            
-            const filesMatch = statsLine.match(/(\d+)\s+file/);
-            if (filesMatch) filesChanged = parseInt(filesMatch[1]);
+            for (let i = 1; i < lines.length; i++) {
+                const line = lines[i].trim();
+                if (!line) continue;
 
-            const addMatch = statsLine.match(/(\d+)\s+insertion/);
-            if (addMatch) additions = parseInt(addMatch[1]);
+                // Summary line: " 5 files changed, 120 insertions(+), 50 deletions(-)"
+                if (line.includes('file') && line.includes('changed')) {
+                    const filesMatch = line.match(/(\d+)\s+file/);
+                    if (filesMatch) filesChanged = parseInt(filesMatch[1]);
 
-            const delMatch = statsLine.match(/(\d+)\s+deletion/);
-            if (delMatch) deletions = parseInt(delMatch[1]);
+                    const addMatch = line.match(/(\d+)\s+insertion/);
+                    if (addMatch) additions = parseInt(addMatch[1]);
+
+                    const delMatch = line.match(/(\d+)\s+deletion/);
+                    if (delMatch) deletions = parseInt(delMatch[1]);
+                    continue;
+                }
+
+                // Stat line: " path/to/file | 10 ++--"
+                const pipeIdx = line.indexOf('|');
+                if (pipeIdx > 0) {
+                    const filePath = line.substring(0, pipeIdx).trim();
+                    if (filePath) changedFiles.push(filePath);
+                }
+            }
+
+            // If summary line failed, use counts from parsed files
+            if (filesChanged === 0) filesChanged = changedFiles.length;
 
             // Determine if this is a pivot
             const isPivot = 
@@ -198,16 +219,30 @@ export class GitManager implements vscode.Disposable {
             const sessionMinutes = this.getSessionDurationMinutes();
             const isDeepWork = sessionMinutes >= this.DEEP_WORK_MINUTES;
 
+            // Infer work type
+            let workType = 'refactor';
+            const msgLower = message.toLowerCase();
+            if (msgLower.startsWith('feat') || msgLower.includes('add ') || msgLower.includes('new ')) workType = 'feature';
+            else if (msgLower.startsWith('fix') || msgLower.includes('bug') || msgLower.includes('issue')) workType = 'bugfix';
+            else if (msgLower.includes('security') || msgLower.includes('vuln')) workType = 'security';
+            else if (msgLower.includes('doc')) workType = 'docs';
+            else if (msgLower.includes('config') || msgLower.includes('env')) workType = 'config';
+            else if (msgLower.includes('test')) workType = 'tests';
+            else if (msgLower.includes('clean')) workType = 'cleanup';
+
             return {
                 hash: commitHash.substring(0, 7),
                 message,
                 additions,
                 deletions,
                 filesChanged,
+                changedFiles,
                 isPivot,
                 isDeepWork,
                 repoRoot,
                 sessionMinutes,
+                diffStat: statsOutput,
+                workType,
             };
 
         } catch (error) {

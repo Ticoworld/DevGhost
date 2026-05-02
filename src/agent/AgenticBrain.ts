@@ -29,6 +29,18 @@ type DeepWorkWrapUpContext = {
     top3Diffs: string[];
 };
 
+type CommitStoryContext = {
+    baselineSummary: string;
+    commitMessage: string;
+    changedFiles: string[];
+    additions: number;
+    deletions: number;
+    workType: string;
+    sessionMinutes: number;
+    diffStat?: string;
+    terminalFriction?: string;
+};
+
 export type BrainResult = 
     | { ok: true; tweet: string }
     | { ok: false; reason: "NO_KEY" | "CLIENT_NOT_READY" | "API_ERROR" | "NO_CONTEXT" | "MODEL_EMPTY_RESPONSE"; message: string };
@@ -53,8 +65,8 @@ export class AgenticBrain {
     ) {}
 
     async process_trigger(
-        triggerType: 'MANUAL_INTENT' | 'FRICTION_BREAKTHROUGH' | 'PROJECT_LAUNCH' | 'PROJECT_RESUME' | 'DEEP_WORK_WRAP_UP',
-        context: ManualIntentContext | FrictionBreakthroughContext | ProjectLaunchContext | ProjectResumeContext | DeepWorkWrapUpContext
+        triggerType: 'MANUAL_INTENT' | 'FRICTION_BREAKTHROUGH' | 'PROJECT_LAUNCH' | 'PROJECT_RESUME' | 'DEEP_WORK_WRAP_UP' | 'COMMIT_DETECTED',
+        context: ManualIntentContext | FrictionBreakthroughContext | ProjectLaunchContext | ProjectResumeContext | DeepWorkWrapUpContext | CommitStoryContext
     ): Promise<BrainResult> {
         if (!this.gemini.isInitialized()) {
             if (!this.hasShownNoKeyNotification) {
@@ -85,8 +97,10 @@ export class AgenticBrain {
             prompt = this.buildProjectLaunchPrompt(baseline);
         } else if (triggerType === 'PROJECT_RESUME') {
             prompt = this.buildProjectResumePrompt(baseline, context as ProjectResumeContext);
-        } else {
+        } else if (triggerType === 'DEEP_WORK_WRAP_UP') {
             prompt = this.buildDeepWorkWrapUpPrompt(baseline, context as DeepWorkWrapUpContext);
+        } else {
+            prompt = this.buildCommitStoryPrompt(baseline, context as CommitStoryContext);
         }
 
         try {
@@ -248,6 +262,41 @@ export class AgenticBrain {
         ].join('\n');
     }
 
+    private buildCommitStoryPrompt(baseline: string, ctx: CommitStoryContext): string {
+        const fileList = (ctx.changedFiles ?? []).slice(0, 15).map(f => `- ${f}`).join('\n');
+        
+        return [
+            'You are DevGhost, an assistant for developers building in public.',
+            'Write ONLY the draft text (max 280 chars). No explanations.',
+            'If not worth sharing, respond: NULL',
+            '',
+            'STRICT STYLE RULES:',
+            '- Write like a developer casually explaining what actually happened.',
+            '- Be specific. Use plain English. No hype. No fake excitement.',
+            '- NO: "excited to announce", "love those moments", "sank into deep work", "hyper-focused".',
+            '- NO generic motivational captions or forced hashtags.',
+            '- Prefer one real bug, fix, or technical detail over a broad summary.',
+            '- Use lower-case where it feels natural for a dev text.',
+            '',
+            'PROJECT BASELINE:',
+            baseline,
+            '',
+            'EVENT: COMMIT_DETECTED',
+            `Work Type: ${ctx.workType}`,
+            `Commit Message: "${ctx.commitMessage}"`,
+            `Stats: +${ctx.additions} / -${ctx.deletions} lines`,
+            `Session Duration: ${ctx.sessionMinutes} minutes`,
+            '',
+            'Changed Files:',
+            fileList || '(none)',
+            '',
+            ctx.diffStat ? `Diff Stat:\n${ctx.diffStat}\n` : '',
+            ctx.terminalFriction ? `Context (Terminal Friction):\n${ctx.terminalFriction}\n` : '',
+            '',
+            'Write the draft (specific, evidence-based, no hype):',
+        ].join('\n');
+    }
+
     private cleanTweetOutput(text: string): string | null {
         const finalText = (text || '').trim();
         if (!finalText) return null;
@@ -256,7 +305,23 @@ export class AgenticBrain {
         const codeBlockMatch = finalText.match(/```(?:text|tweet)?\s*\n?([\s\S]*?)\n?```/);
         let cleaned = codeBlockMatch?.[1]?.trim() || finalText;
 
-        cleaned = cleaned.replace(/^tweet:\s*/i, '').replace(/^output:\s*/i, '').trim();
+        // Strip AI-ish headers
+        cleaned = cleaned.replace(/^(tweet|draft|output|here's a draft):\s*/i, '').trim();
+        
+        // Strip common AI-ish hype phrases
+        const hypePhrases = [
+            /excited to announce/i,
+            /love those moments/i,
+            /hyper-focused moments/i,
+            /sank into deep work/i,
+            /love those hyper-focused moments/i,
+            /just shipped/i
+        ];
+        
+        for (const phrase of hypePhrases) {
+            cleaned = cleaned.replace(phrase, '').trim();
+        }
+
         cleaned = cleaned.replace(/%23/g, '#').replace(/%20/g, ' ').trim();
 
         if (cleaned.length < 10) return null;
