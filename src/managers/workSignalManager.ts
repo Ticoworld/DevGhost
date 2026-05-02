@@ -17,6 +17,7 @@ export type AutomaticDraftTrigger =
     | 'DEEP_WORK_WRAP_UP'
     | 'WARMUP_RETURN'
     | 'SILENCE_BREAKER'
+    | 'COMMIT_DETECTED'
     | 'FOCUS_INTENT';
 
 export interface AutomaticDraftHints {
@@ -880,6 +881,8 @@ export class WorkSignalManager {
                 return 30;
             case 'SILENCE_BREAKER':
                 return 20;
+            case 'COMMIT_DETECTED':
+                return 30;
             case 'WARMUP_RETURN':
                 return 18;
             case 'PROJECT_RESUME':

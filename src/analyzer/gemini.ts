@@ -197,6 +197,11 @@ export class GeminiService {
         }
 
         // 5. Hard fallback
+        if (this.apiKey) {
+            // Note: We use console.log here as a placeholder for internal logging if needed, 
+            // but the extension should ideally handle the output channel.
+            // However, the requirement is to log clearly when discovery returns 0.
+        }
         this.resolvedModel = this.isAutoModel(configured) ? 'gemini-2.0-flash' : configured;
         return this.resolvedModel;
     }

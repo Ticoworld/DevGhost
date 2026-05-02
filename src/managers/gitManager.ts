@@ -251,7 +251,7 @@ export class GitManager implements vscode.Disposable {
             this.outputChannel.appendLine('🏆 ═══════════════════════════════════════════');
             this.outputChannel.appendLine('   DEEP WORK SESSION');
             this.outputChannel.appendLine(`   ${analysis.sessionMinutes} minutes of focused work`);
-            this.outputChannel.appendLine('   (Will prompt only if commit is significant)');
+            this.outputChannel.appendLine('   Commit recorded. DevGhost will evaluate whether it is worth a draft.');
             this.outputChannel.appendLine('═══════════════════════════════════════════ 🏆');
             this.outputChannel.appendLine('');
         }

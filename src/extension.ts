@@ -250,7 +250,7 @@ type DraftFlowOptions = {
 };
 
 type AutomaticDraftGateOptions = {
-    trigger: 'PROJECT_LAUNCH' | 'PROJECT_RESUME' | 'FRICTION_BREAKTHROUGH' | 'DEEP_WORK_WRAP_UP' | 'WARMUP_RETURN' | 'SILENCE_BREAKER' | 'FOCUS_INTENT';
+    trigger: 'PROJECT_LAUNCH' | 'PROJECT_RESUME' | 'FRICTION_BREAKTHROUGH' | 'DEEP_WORK_WRAP_UP' | 'WARMUP_RETURN' | 'SILENCE_BREAKER' | 'COMMIT_DETECTED' | 'FOCUS_INTENT';
     eventKey: string;
     label: string;
     hints?: {
@@ -376,9 +376,24 @@ async function ensureGeminiReady(options: { explicit: boolean; reason: string; f
         const count = geminiService.getDiscoveredModelsCount() || 0;
         const configured = vscode.workspace.getConfiguration('devghost').get<string>('model', 'auto');
         const resolved = await geminiService.resolveBestModel(options.forceRefresh ?? false);
-        outputChannel?.appendLine(`[DevGhost] Discovered ${count} compatible AI models`);
-        outputChannel?.appendLine(`[DevGhost] Configured model: ${configured}`);
-        outputChannel?.appendLine(`[DevGhost] Selected model: ${resolved}`);
+        if (count === 0) {
+            outputChannel?.appendLine('[DevGhost] Model discovery returned 0 compatible models.');
+            outputChannel?.appendLine(`[DevGhost] Trying fallback model: ${resolved}`);
+            
+            // Validate the fallback model
+            try {
+                await geminiService.validateModel(resolved, false);
+                outputChannel?.appendLine(`[DevGhost] Fallback model validated: ${resolved}`);
+            } catch (vError) {
+                const vMsg = vError instanceof Error ? vError.message : String(vError);
+                outputChannel?.appendLine(`[DevGhost] Fallback model validation failed: ${vMsg}`);
+                throw new Error('No compatible AI model is available for this key.');
+            }
+        } else {
+            outputChannel?.appendLine(`[DevGhost] Discovered ${count} compatible AI models`);
+            outputChannel?.appendLine(`[DevGhost] Configured model: ${configured}`);
+            outputChannel?.appendLine(`[DevGhost] Selected model: ${resolved}`);
+        }
         return true;
     } catch (error) {
         const errMsg = error instanceof Error ? error.message : String(error);
@@ -565,9 +580,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     });
 
     const activeEditorListener = vscode.window.onDidChangeActiveTextEditor((editor) => {
-        workSignalManager?.recordActiveFile(editor?.document ?? null);
+        if (editor) {
+            workSignalManager?.recordActiveFile(editor.document);
+        }
     });
     context.subscriptions.push(activeEditorListener);
+    if (vscode.window.activeTextEditor) {
+        workSignalManager?.recordActiveFile(vscode.window.activeTextEditor.document);
+    }
 
     const textChangeListener = vscode.workspace.onDidChangeTextDocument((event) => {
         workSignalManager?.recordTextChange(event.document);
@@ -756,7 +776,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         outputChannel.appendLine('[DevGhost] ⚠️ Shell Integration not available (friction breakthrough disabled)');
     }
 
-    outputChannel.appendLine('[DevGhost] All systems initialized ✓');
+    outputChannel.appendLine('[DevGhost] DevGhost is watching this workspace.');
     outputChannel.appendLine('');
 
     // Phase 6B: Ask focus on open, then offer a review-first draft
@@ -1075,16 +1095,7 @@ function registerCommands(context: vscode.ExtensionContext): void {
                     return;
                 }
 
-                const count = geminiService?.getDiscoveredModelsCount() || 0;
-                outputChannel?.appendLine(`[DevGhost] Discovered ${count} compatible AI models.`);
-                
-                // 2. Resolve best model
-                const configured = vscode.workspace.getConfiguration('devghost').get<string>('model', 'auto');
-                const resolved = await geminiService?.resolveBestModel(true);
-                outputChannel?.appendLine(`[DevGhost] Configured model: ${configured}`);
-                outputChannel?.appendLine(`[DevGhost] Selected model: ${resolved}`);
-
-                // 3. Test generation
+                // ensureGeminiReady already logged discovery and validation details.
                 const isValid = await geminiService?.validateKey();
                 if (isValid) {
                     outputChannel?.appendLine('[DevGhost] AI setup looks good.');
@@ -1305,6 +1316,42 @@ async function handleCommitDetected(analysis: CommitAnalysis): Promise<void> {
             workSignalManager?.recordFocus(contextManager?.getConfig()?.currentFocus || focusResult.inferredFocus);
         }, 500);
     }
+
+    // Phase 9: Evaluate if this commit is worth a draft
+    const eventKey = `commit:${analysis.repoRoot}:${analysis.hash}`;
+    if (!await allowAutomaticDraft({
+        trigger: 'COMMIT_DETECTED',
+        eventKey,
+        label: 'Commit draft',
+    })) {
+        return;
+    }
+
+    await runDraftFlow({
+        automatic: true,
+        eventKey,
+        label: 'Commit draft',
+        createDraft: async () => {
+            if (!geminiService?.isInitialized()) return null;
+            
+            const config = contextManager?.getConfig();
+            const context = {
+                projectName: config?.projectName || 'my project',
+                mission: config?.mission,
+                currentFocus: config?.currentFocus,
+                tone: (config?.tone || 'raw') as any,
+            };
+            
+            if (analysis.isPivot) {
+                return await geminiService.generatePivotPost(context, analysis, analysis.message);
+            } else if (analysis.isDeepWork) {
+                return await geminiService.generateDeepWorkPost(context, analysis.sessionMinutes, analysis.message);
+            } else {
+                // Generic but context-aware commit draft
+                return await geminiService.generateDeepWorkPost(context, analysis.sessionMinutes, analysis.message);
+            }
+        }
+    });
 }
 
 // Phase 5 commit-driven drafting removed in Phase 3.

@@ -120,7 +120,7 @@ export class ContextManager implements vscode.Disposable {
         }
         this.outputChannel.appendLine('');
 
-        vscode.window.showInformationMessage(`DevGhost: "${projectName}" is set up. DevGhost is watching this workspace.`);
+        vscode.window.showInformationMessage('Project setup complete. DevGhost is watching this workspace.');
 
         return true;
     }
