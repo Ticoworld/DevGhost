@@ -6,6 +6,7 @@ import type { CommitAnalysis } from './gitManager';
 
 const AUTO_DRAFT_SCORE_THRESHOLD = 70;
 const AUTO_DRAFT_COOLDOWN_MINUTES = 45;
+const RECOVERY_SIGNAL_TTL_MINUTES = 45;
 const BURST_RESET_MINUTES = 10;
 const STABILITY_PAUSE_MINUTES = 8;
 type FileCategory = 'source' | 'config' | 'docs' | 'style' | 'generated' | 'noise' | 'other';
@@ -74,6 +75,8 @@ interface CommandStats {
     lastFailureAt: number | null;
     lastSuccessAt: number | null;
     recovered: boolean;
+    recoveredAt: number | null;
+    recoveredBurstStartedAt: number | null;
 }
 
 interface GitStatusSummary {
@@ -204,8 +207,10 @@ export class WorkSignalManager {
     private burstTouchedSourceFiles = new Set<string>();
     private burstTouchedSymbols = new Set<string>();
     private burstBuildValidationSuccesses = 0;
-    private sessionCommitCount = 0;
     private burstHasRecoverySignal = false;
+    private burstHasCommitSignal = false;
+    private sessionCommitCount = 0;
+    private recoverySignalsConsumedAt = 0;
 
     constructor(workspaceState: vscode.Memento, _outputChannel?: vscode.OutputChannel) {
         this.workspaceState = workspaceState;
@@ -256,18 +261,22 @@ export class WorkSignalManager {
             lastFailureAt: null,
             lastSuccessAt: null,
             recovered: false,
+            recoveredAt: null,
+            recoveredBurstStartedAt: null,
         };
 
         if (exitCode === 0) {
             stats.successes++;
+            const hadUnrecoveredFailure = stats.lastFailureAt !== null && (stats.lastSuccessAt === null || stats.lastFailureAt > stats.lastSuccessAt);
             stats.lastSuccessAt = now;
-            if (stats.failures > 0) {
+            if (hadUnrecoveredFailure) {
                 stats.recovered = true;
+                stats.recoveredAt = now;
+                stats.recoveredBurstStartedAt = this.burstStartedAt;
                 this.burstHasRecoverySignal = true;
             }
             if (this.isBuildValidationCommand(normalized)) {
                 this.burstBuildValidationSuccesses++;
-                this.burstHasRecoverySignal = true;
             }
         } else {
             stats.failures++;
@@ -286,8 +295,8 @@ export class WorkSignalManager {
         this.advanceBurst(now);
         this.lastActivityAt = now;
         this.burstLastActivityAt = now;
+        this.burstHasCommitSignal = true;
         this.sessionCommitCount++;
-        this.burstHasRecoverySignal = true;
         this.timeline.push({ kind: 'commit', timestamp: now });
         this.trimTimeline();
     }
@@ -315,12 +324,19 @@ export class WorkSignalManager {
         const now = Date.now();
         this.autoMeta.lastSuggestedAt = now;
         this.autoMeta.lastEventKey = eventKey;
+        this.recoverySignalsConsumedAt = now;
+        this.burstHasRecoverySignal = false;
         void this.workspaceState.update(this.autoMetaKey, this.autoMeta).then(
             () => undefined,
             () => undefined
         );
         this.timeline.push({ kind: 'auto_draft', timestamp: now });
         this.trimTimeline();
+    }
+
+    consumeFreshRecoverySignals(): void {
+        this.recoverySignalsConsumedAt = Date.now();
+        this.burstHasRecoverySignal = false;
     }
 
     resetLocalSignals(): void {
@@ -334,9 +350,11 @@ export class WorkSignalManager {
         this.burstTouchedSourceFiles = new Set<string>();
         this.burstTouchedSymbols = new Set<string>();
         this.burstBuildValidationSuccesses = 0;
-        this.sessionCommitCount = 0;
         this.burstHasRecoverySignal = false;
+        this.burstHasCommitSignal = false;
+        this.sessionCommitCount = 0;
         this.lastActivityAt = 0;
+        this.recoverySignalsConsumedAt = 0;
         this.autoMeta.lastSuggestedAt = null;
         this.autoMeta.lastEventKey = null;
         void this.workspaceState.update(this.autoMetaKey, this.autoMeta).then(
@@ -348,6 +366,12 @@ export class WorkSignalManager {
     getMinutesSinceLastAutomaticSuggestion(now: number = Date.now()): number | null {
         if (!this.autoMeta.lastSuggestedAt) return null;
         return Math.floor((now - this.autoMeta.lastSuggestedAt) / 60000);
+    }
+
+    getRecentTouchedSymbols(limit: number = 10): string[] {
+        const symbols = [...this.burstTouchedSymbols];
+        if (symbols.length === 0) return [];
+        return symbols.slice(Math.max(0, symbols.length - Math.max(1, limit)));
     }
 
     evaluateAutomaticDraft(input: AutomaticDraftInput): AutomaticDraftDecision {
@@ -546,6 +570,26 @@ export class WorkSignalManager {
             .join('\n');
     }
 
+    private countFreshRecoverySignals(now: number): number {
+        const ttlMs = RECOVERY_SIGNAL_TTL_MINUTES * 60 * 1000;
+
+        return [...this.commandStats.values()].reduce((count, stats) => {
+            if (!stats.recovered || stats.recoveredAt === null || stats.recoveredBurstStartedAt !== this.burstStartedAt) {
+                return count;
+            }
+
+            if (stats.recoveredAt <= this.recoverySignalsConsumedAt) {
+                return count;
+            }
+
+            if (now - stats.recoveredAt > ttlMs) {
+                return count;
+            }
+
+            return count + 1;
+        }, 0);
+    }
+
     private buildSnapshot(now: number, focusAgeMinutes: number, sessionMinutes: number, workspaceRoot: string, hints?: AutomaticDraftHints): SignalSnapshot {
         const uniqueFiles = [...this.fileStats.values()];
         const uniqueFileCount = this.fileStats.size;
@@ -562,7 +606,7 @@ export class WorkSignalManager {
         const editCount = uniqueFiles.reduce((sum, file) => sum + file.touches, 0);
         const terminalFailureCount = [...this.commandStats.values()].reduce((sum, stats) => sum + stats.failures, 0);
         const terminalSuccessCount = [...this.commandStats.values()].reduce((sum, stats) => sum + stats.successes, 0);
-        const recoveryCount = [...this.commandStats.values()].filter((stats) => stats.recovered).length;
+        const recoveryCount = this.countFreshRecoverySignals(now);
         const buildValidationSuccessCount = [...this.commandStats.entries()].filter(([command, stats]) => stats.successes > 0 && this.isBuildValidationCommand(command)).length;
         const commitCount = this.sessionCommitCount;
         const featurePathCount = uniqueFiles.filter((file) => file.category === 'source' && FEATURE_PATH_PATTERNS.test(file.filePath)).length;
@@ -570,14 +614,14 @@ export class WorkSignalManager {
         const burstDurationMinutes = this.burstStartedAt > 0 ? Math.floor((now - this.burstStartedAt) / 60000) : 0;
         const burstFileCount = this.burstTouchedFiles.size;
         const burstSourceFileCount = this.burstTouchedSourceFiles.size;
-        const burstHasStabilitySignal = this.burstHasRecoverySignal || this.burstBuildValidationSuccesses > 0 || focusAgeMinutes >= 60 || sessionMinutes >= 90;
+        const burstHasStabilitySignal = this.burstHasCommitSignal || this.burstHasRecoverySignal || this.burstBuildValidationSuccesses > 0 || focusAgeMinutes >= 60 || sessionMinutes >= 90;
         const burstPauseStable = this.burstLastActivityAt > 0 ? (now - this.burstLastActivityAt) >= (STABILITY_PAUSE_MINUTES * 60 * 1000) : false;
         const onlyNoiseFilesChanged = uniqueFileCount > 0 && sourceFileCount === 0 && configFileCount === 0 && docsFileCount === 0 && styleFileCount === 0 && (generatedFileCount > 0 || noiseFileCount > 0);
         const onlyFormattingOrDocsChanged = uniqueFileCount > 0 && sourceFileCount === 0 && generatedFileCount === 0 && noiseFileCount === 0 && (docsFileCount > 0 || styleFileCount > 0 || configFileCount > 0);
         const likelyMassiveBurst = burstFileCount >= 8 && !burstHasStabilitySignal && !burstPauseStable;
         const hasBuildStabilitySignal = this.burstBuildValidationSuccesses > 0 || buildValidationSuccessCount > 0;
         const hasCommitSignal = commitCount > 0;
-        const hasRecoverySignal = this.burstHasRecoverySignal || recoveryCount > 0;
+        const hasRecoverySignal = recoveryCount > 0;
         const status = this.readGitStatusSummary(workspaceRoot);
 
         const snap: SignalSnapshot = {
@@ -873,6 +917,7 @@ export class WorkSignalManager {
             this.burstTouchedSymbols = new Set<string>();
             this.burstBuildValidationSuccesses = 0;
             this.burstHasRecoverySignal = false;
+            this.burstHasCommitSignal = false;
         } else if (this.burstStartedAt === 0) {
             this.burstStartedAt = now;
         }

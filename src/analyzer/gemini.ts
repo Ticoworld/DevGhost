@@ -725,7 +725,7 @@ Write the draft:`;
     /**
      * Clean up the generated draft.
      */
-    private cleanTweet(text: string): string {
+    private cleanTweet(text: string, options?: { allowHashtags?: boolean }): string {
         let cleaned = text.trim();
         
         // Remove surrounding quotes if present
@@ -735,7 +735,20 @@ Write the draft:`;
         }
 
         // Strip AI-ish headers
-        cleaned = cleaned.replace(/^(tweet|draft|output|here's a draft):\s*/i, '').trim();
+        const wrapperPatterns = [
+            /^(?:tweet|draft|output):\s*/i,
+            /^here(?:'|\u2019)?s a draft:\s*/i,
+            /^here is a draft:\s*/i,
+            /^here(?:'|\u2019)?s my draft:\s*/i,
+            /^here is my draft:\s*/i,
+            /^suggested draft:\s*/i,
+        ];
+
+        for (const pattern of wrapperPatterns) {
+            cleaned = cleaned.replace(pattern, '').trim();
+        }
+
+        cleaned = cleaned.replace(/%23/g, '#').replace(/%20/g, ' ').trim();
         
         // Strip common AI-ish hype phrases
         const hypePhrases = [
@@ -744,11 +757,23 @@ Write the draft:`;
             /hyper-focused moments/i,
             /sank into deep work/i,
             /love those hyper-focused moments/i,
-            /just shipped/i
+            /just shipped/i,
+            /just pushed/i,
+            /big update/i,
+            /lots of changes/i,
+            /feels good/i,
+            /laid out/i
         ];
         
         for (const phrase of hypePhrases) {
             cleaned = cleaned.replace(phrase, '').trim();
+        }
+
+        if (options?.allowHashtags === false) {
+            cleaned = cleaned
+                .replace(/(^|\s)#[A-Za-z][A-Za-z0-9_-]*/g, '$1')
+                .replace(/\s{2,}/g, ' ')
+                .trim();
         }
 
         // Truncate if over 280 chars

@@ -32,8 +32,8 @@ FUZZY TIME RULES (critical):
 - NEVER count bugs/errors numerically in the draft (e.g., "3 errors" → "a few bugs", "1 thing" not "1 things").
 - Be casual. Sound like texting a dev friend, not a status report.
 
-TONE: Informal, lower-case is okay, dev slang (e.g., 'shipped', 'refactored', 'pain').
-- NO generic marketing hashtags. Use #BuildInPublic only.
+TONE: Informal, lower-case is okay, dev slang (e.g., 'refactored', 'stuck', 'pain').
+- Do not add hashtags unless the specific prompt asks for one.
 - Be authentic, not corporate. Sound like a real dev.`;
 
     /**

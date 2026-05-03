@@ -13,4 +13,5 @@ export { GitManager } from './gitManager';
 export { HistoryManager } from './historyManager';
 export { WorkSignalManager } from './workSignalManager';
 export type { CommitAnalysis } from './gitManager';
+export type { AutomaticDraftDecision } from './workSignalManager';
 export type { HistoryEvent, HistoryEventType } from './historyManager';

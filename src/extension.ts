@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import { ContextManager, SessionManager, GitManager, HistoryManager, WorkSignalManager, CommitAnalysis } from './managers';
+import { ContextManager, SessionManager, GitManager, HistoryManager, WorkSignalManager, CommitAnalysis, AutomaticDraftDecision } from './managers';
 import { KeyManager, GeminiService } from './analyzer';
 import { scanProjectEnvironment } from './analyzer/projectScanner';
 
@@ -33,6 +33,7 @@ let workSignalManager: WorkSignalManager | undefined;
 let keyManager: KeyManager | undefined;
 let geminiService: GeminiService | undefined;
 let workspaceState: vscode.Memento | undefined;
+let lastAutomaticDraftDecision: { eventKey: string; decision: AutomaticDraftDecision } | null = null;
 
 // Phase 8: Agentic Intelligence
 import { AgenticBrain } from './agent/AgenticBrain';
@@ -152,6 +153,143 @@ function canDraftPostOrWarn(isManual?: boolean): boolean {
         outputChannel?.appendLine('[DevGhost] ⚠️ Daily draft limit reached (3 drafts / 24h). Aborting AI draft.');
     }
     return ok;
+}
+
+function rememberAutomaticDraftDecision(eventKey: string, decision: AutomaticDraftDecision): void {
+    lastAutomaticDraftDecision = { eventKey, decision };
+}
+
+function consumeAutomaticDraftDecision(eventKey: string): AutomaticDraftDecision | null {
+    if (lastAutomaticDraftDecision?.eventKey !== eventKey) {
+        return null;
+    }
+
+    const decision = lastAutomaticDraftDecision.decision;
+    lastAutomaticDraftDecision = null;
+    return decision;
+}
+
+type CommitFileCategory = 'source' | 'config' | 'docs' | 'style' | 'generated' | 'other';
+
+function classifyCommitFile(filePath: string): CommitFileCategory {
+    if (!filePath) return 'other';
+
+    const normalized = filePath.replace(/\\/g, '/').toLowerCase();
+    const basename = path.basename(normalized);
+    const ext = path.extname(normalized);
+
+    if (
+        normalized.includes('/node_modules/') ||
+        normalized.includes('/.git/') ||
+        normalized.includes('/dist/') ||
+        normalized.includes('/build/') ||
+        normalized.includes('/out/') ||
+        normalized.includes('/coverage/') ||
+        normalized.includes('/.next/') ||
+        normalized.includes('/snapshots/') ||
+        /^package-lock\.json$/.test(basename) ||
+        /^yarn\.lock$/.test(basename) ||
+        /^pnpm-lock\.yaml$/.test(basename)
+    ) {
+        return 'generated';
+    }
+
+    if (['.md', '.rst', '.txt'].includes(ext) || /(^|\/)(readme|changelog|license)(\.[^.]+)?$/.test(basename)) {
+        return 'docs';
+    }
+
+    if (['.css', '.scss', '.sass', '.less'].includes(ext)) {
+        return 'style';
+    }
+
+    if (['.json', '.yaml', '.yml', '.toml', '.ini', '.env'].includes(ext) || /(^|\/)package\.json$/.test(normalized) || /\.env(\..+)?$/.test(basename)) {
+        return 'config';
+    }
+
+    if (['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '.rs', '.go', '.java', '.cpp', '.c', '.h', '.hpp', '.cs', '.kt', '.swift', '.rb', '.php', '.sql'].includes(ext)) {
+        return 'source';
+    }
+
+    if (/(route|routes|api|component|components|page|pages|command|commands|config|controller|service|hook|hooks|store|module|modules|layout|screen|feature|features|middleware)/i.test(normalized)) {
+        return 'source';
+    }
+
+    return 'other';
+}
+
+function buildCompactCommitSummary(analysis: CommitAnalysis): { compactDiffSummary: string; fileCategories: string } {
+    const counts: Record<CommitFileCategory, number> = {
+        source: 0,
+        config: 0,
+        docs: 0,
+        style: 0,
+        generated: 0,
+        other: 0,
+    };
+
+    const topFiles = (analysis.changedFiles ?? []).slice(0, 8).map((filePath) => {
+        const category = classifyCommitFile(filePath);
+        counts[category]++;
+        return `${filePath} (${category})`;
+    });
+
+    for (const filePath of (analysis.changedFiles ?? []).slice(topFiles.length)) {
+        const category = classifyCommitFile(filePath);
+        counts[category]++;
+    }
+
+    const fileCategories = (Object.entries(counts) as Array<[CommitFileCategory, number]>)
+        .filter(([, count]) => count > 0)
+        .map(([category, count]) => `${category}: ${count}`)
+        .join(', ') || 'none';
+
+    const topFilesText = topFiles.length > 0 ? topFiles.join(', ') : 'none';
+    const compactDiffSummary = `+${analysis.additions} / -${analysis.deletions} across ${analysis.filesChanged} files; file mix: ${fileCategories}; top files: ${topFilesText}`;
+
+    return {
+        compactDiffSummary,
+        fileCategories,
+    };
+}
+
+function inferWhyItMatters(analysis: CommitAnalysis): string {
+    const fileBlob = (analysis.changedFiles ?? []).join(' ').toLowerCase();
+
+    if (/(src\/(agent|managers|extension|analyzer)|worksignalmanager|gitmanager|sessionmanager|agenticbrain)/i.test(fileBlob)) {
+        return 'it changes core drafting or signal-tracking behavior, so future drafts should reflect real work more accurately.';
+    }
+
+    if (analysis.workType === 'feature') {
+        return 'it adds product behavior that users can feel.';
+    }
+
+    if (analysis.workType === 'bugfix') {
+        return 'it fixes a workflow problem that was blocking progress.';
+    }
+
+    if (analysis.workType === 'refactor') {
+        return 'it reorganizes code to make the system easier to maintain.';
+    }
+
+    return 'why not clear from available evidence';
+}
+
+function inferUserFacingResult(analysis: CommitAnalysis): string {
+    const fileBlob = (analysis.changedFiles ?? []).join(' ').toLowerCase();
+
+    if (/(src\/(agent|managers|extension|analyzer)|worksignalmanager|gitmanager|sessionmanager|agenticbrain)/i.test(fileBlob)) {
+        return 'review-first draft behavior should mirror the work signal more accurately.';
+    }
+
+    if (analysis.workType === 'feature') {
+        return 'users should get a new or improved behavior from this change.';
+    }
+
+    if (analysis.workType === 'bugfix') {
+        return 'a visible problem in the workflow should be reduced.';
+    }
+
+    return 'why not clear from available evidence';
 }
 
 // Phase 3: Terminal friction breakthrough — failure streak persisted in workspaceState (key below)
@@ -300,6 +438,7 @@ async function allowAutomaticDraft(options: AutomaticDraftGateOptions): Promise<
         canPostToday,
         hints: options.hints,
     });
+    rememberAutomaticDraftDecision(options.eventKey, decision);
 
     if (!decision.allowed) {
         outputChannel?.appendLine(`[DevGhost] Auto draft skipped (${options.label}): score ${decision.score}/${decision.threshold} | ${decision.blockers.join('; ')}`);
@@ -543,7 +682,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.subscriptions.push(outputChannel);
 
     // Welcome message
-    const version = vscode.extensions.getExtension('devghost.devghost')?.packageJSON.version || '3.3.2';
+    const version = vscode.extensions.getExtension('devghost.devghost')?.packageJSON.version || '3.3.5';
     outputChannel.appendLine('═══════════════════════════════════════════════════');
     outputChannel.appendLine(`  DevGhost ${version} - Quiet build-in-public companion`);
     outputChannel.appendLine('═══════════════════════════════════════════════════');
@@ -1329,6 +1468,15 @@ async function handleCommitDetected(analysis: CommitAnalysis): Promise<void> {
         return;
     }
 
+    const scoreDecision = consumeAutomaticDraftDecision(eventKey);
+    const currentFocus = contextManager?.getConfig()?.currentFocus || '';
+    const freshTerminalFriction = sessionManager?.getRecentFrictionSummary(30) || undefined;
+    const touchedSymbols = workSignalManager?.getRecentTouchedSymbols(10) || [];
+    const { compactDiffSummary, fileCategories } = buildCompactCommitSummary(analysis);
+    const compactDiffStat = analysis.diffStat ? analysis.diffStat.split('\n').slice(0, 12).join('\n') : undefined;
+    const whyItMatters = inferWhyItMatters(analysis);
+    const userFacingResult = inferUserFacingResult(analysis);
+
     await runDraftFlow({
         automatic: true,
         eventKey,
@@ -1347,8 +1495,15 @@ async function handleCommitDetected(analysis: CommitAnalysis): Promise<void> {
                 deletions: analysis.deletions,
                 workType: analysis.workType || 'refactor',
                 sessionMinutes: analysis.sessionMinutes,
-                diffStat: analysis.diffStat,
-                terminalFriction: sessionManager?.getRecentFrictionSummary() || undefined
+                diffStat: compactDiffStat,
+                focus: currentFocus,
+                terminalFriction: freshTerminalFriction,
+                scoreReasons: scoreDecision?.reasons?.slice(0, 8),
+                touchedSymbols,
+                compactDiffSummary,
+                fileCategories,
+                whyItMatters,
+                userFacingResult,
             });
 
             return result.ok ? result.tweet : null;

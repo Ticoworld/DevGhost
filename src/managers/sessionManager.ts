@@ -471,9 +471,16 @@ export class SessionManager implements vscode.Disposable {
     /**
      * Get a summary of recent command failures (friction).
      */
-    getRecentFrictionSummary(): string | null {
+    getRecentFrictionSummary(maxAgeMinutes: number = 30): string | null {
         if (this.recentFailures.length === 0) return null;
-        return this.recentFailures
+
+        const maxAgeMs = Math.max(0, maxAgeMinutes) * 60 * 1000;
+        const now = Date.now();
+        const freshFailures = this.recentFailures.filter((failure) => now - failure.timestamp <= maxAgeMs);
+
+        if (freshFailures.length === 0) return null;
+
+        return freshFailures
             .slice(-5)
             .map(f => `- ${f.command} (exit ${f.exitCode})`)
             .join('\n');

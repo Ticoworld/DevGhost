@@ -37,8 +37,15 @@ type CommitStoryContext = {
     deletions: number;
     workType: string;
     sessionMinutes: number;
+    focus?: string;
     diffStat?: string;
     terminalFriction?: string;
+    scoreReasons?: string[];
+    touchedSymbols?: string[];
+    compactDiffSummary?: string;
+    fileCategories?: string;
+    whyItMatters?: string;
+    userFacingResult?: string;
 };
 
 export type BrainResult = 
@@ -108,7 +115,10 @@ export class AgenticBrain {
             if (!raw || raw.toUpperCase() === 'NULL') {
                 return { ok: false, reason: "MODEL_EMPTY_RESPONSE", message: "AI decided this session is not worth a draft." };
             }
-            const tweet = this.cleanTweetOutput(raw);
+            const tweet = this.cleanTweetOutput(raw, {
+                allowHashtags: triggerType !== 'COMMIT_DETECTED',
+                strictCommitStyle: triggerType === 'COMMIT_DETECTED',
+            });
             return tweet ? { ok: true, tweet } : { ok: false, reason: "MODEL_EMPTY_RESPONSE", message: "AI returned an empty or invalid draft." };
         } catch (error: any) {
             const errMsg = error?.message || String(error);
@@ -264,6 +274,8 @@ export class AgenticBrain {
 
     private buildCommitStoryPrompt(baseline: string, ctx: CommitStoryContext): string {
         const fileList = (ctx.changedFiles ?? []).slice(0, 15).map(f => `- ${f}`).join('\n');
+        const scoreReasons = (ctx.scoreReasons ?? []).slice(0, 8).map((reason) => `- ${reason}`).join('\n') || '(not available)';
+        const touchedSymbols = (ctx.touchedSymbols ?? []).slice(0, 10).join(', ') || '(not available)';
         
         return [
             'You are DevGhost, an assistant for developers building in public.',
@@ -275,7 +287,11 @@ export class AgenticBrain {
             '- Be specific. Use plain English. No hype. No fake excitement.',
             '- NO: "excited to announce", "love those moments", "sank into deep work", "hyper-focused".',
             '- NO generic motivational captions or forced hashtags.',
+            '- NO: "just pushed", "big update", "lots of changes", "feels good", "laid out".',
+            '- NO generic "shipped" brag unless the commit is explicitly about a release.',
+            '- Do not copy the commit message shape.',
             '- Prefer one real bug, fix, or technical detail over a broad summary.',
+            '- If the exact why is unclear, write a smaller factual post instead of inventing emotion.',
             '- Use lower-case where it feels natural for a dev text.',
             '',
             'PROJECT BASELINE:',
@@ -283,21 +299,29 @@ export class AgenticBrain {
             '',
             'EVENT: COMMIT_DETECTED',
             `Work Type: ${ctx.workType}`,
-            `Commit Message: "${ctx.commitMessage}"`,
+            `Focus: ${ctx.focus?.trim() || '(none)'}`,
+            `Commit Message (evidence only, do not paraphrase): "${ctx.commitMessage}"`,
+            `Score Reasons (context only):`,
+            scoreReasons,
+            `Touched Symbols/Functions: ${touchedSymbols}`,
+            `File Categories: ${ctx.fileCategories || '(not inferred)'}`,
+            `Compact Diff Summary: ${ctx.compactDiffSummary || '(not clear from available evidence)'}`,
             `Stats: +${ctx.additions} / -${ctx.deletions} lines`,
             `Session Duration: ${ctx.sessionMinutes} minutes`,
+            `Why it matters: ${ctx.whyItMatters || 'why not clear from available evidence'}`,
+            `User-facing result: ${ctx.userFacingResult || 'why not clear from available evidence'}`,
             '',
             'Changed Files:',
             fileList || '(none)',
             '',
             ctx.diffStat ? `Diff Stat:\n${ctx.diffStat}\n` : '',
-            ctx.terminalFriction ? `Context (Terminal Friction):\n${ctx.terminalFriction}\n` : '',
+            ctx.terminalFriction ? `Fresh terminal friction:\n${ctx.terminalFriction}\n` : '',
             '',
-            'Write the draft (specific, evidence-based, no hype):',
+            'Write the draft (specific, evidence-based, no hype, no hashtag):',
         ].join('\n');
     }
 
-    private cleanTweetOutput(text: string): string | null {
+    private cleanTweetOutput(text: string, options?: { allowHashtags?: boolean; strictCommitStyle?: boolean }): string | null {
         const finalText = (text || '').trim();
         if (!finalText) return null;
         if (finalText.toUpperCase() === 'NULL') return null;
@@ -306,7 +330,20 @@ export class AgenticBrain {
         let cleaned = codeBlockMatch?.[1]?.trim() || finalText;
 
         // Strip AI-ish headers
-        cleaned = cleaned.replace(/^(tweet|draft|output|here's a draft):\s*/i, '').trim();
+        const wrapperPatterns = [
+            /^(?:tweet|draft|output):\s*/i,
+            /^here(?:'|\u2019)?s a draft:\s*/i,
+            /^here is a draft:\s*/i,
+            /^here(?:'|\u2019)?s my draft:\s*/i,
+            /^here is my draft:\s*/i,
+            /^suggested draft:\s*/i,
+        ];
+
+        for (const pattern of wrapperPatterns) {
+            cleaned = cleaned.replace(pattern, '').trim();
+        }
+
+        cleaned = cleaned.replace(/%23/g, '#').replace(/%20/g, ' ').trim();
         
         // Strip common AI-ish hype phrases
         const hypePhrases = [
@@ -314,15 +351,34 @@ export class AgenticBrain {
             /love those moments/i,
             /hyper-focused moments/i,
             /sank into deep work/i,
-            /love those hyper-focused moments/i,
-            /just shipped/i
+            /love those hyper-focused moments/i
         ];
         
         for (const phrase of hypePhrases) {
             cleaned = cleaned.replace(phrase, '').trim();
         }
 
-        cleaned = cleaned.replace(/%23/g, '#').replace(/%20/g, ' ').trim();
+        if (options?.strictCommitStyle) {
+            const commitPhrases = [
+                /just shipped/i,
+                /just pushed/i,
+                /big update/i,
+                /lots of changes/i,
+                /feels good/i,
+                /laid out/i
+            ];
+
+            for (const phrase of commitPhrases) {
+                cleaned = cleaned.replace(phrase, '').trim();
+            }
+        }
+
+        if (options?.allowHashtags === false) {
+            cleaned = cleaned
+                .replace(/(^|\s)#[A-Za-z][A-Za-z0-9_-]*/g, '$1')
+                .replace(/\s{2,}/g, ' ')
+                .trim();
+        }
 
         if (cleaned.length < 10) return null;
         if (cleaned.length > 280) cleaned = cleaned.slice(0, 277).trimEnd() + '...';
