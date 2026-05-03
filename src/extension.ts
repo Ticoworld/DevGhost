@@ -252,11 +252,42 @@ function buildCompactCommitSummary(analysis: CommitAnalysis): { compactDiffSumma
     };
 }
 
-function inferWhyItMatters(analysis: CommitAnalysis): string {
-    const fileBlob = (analysis.changedFiles ?? []).join(' ').toLowerCase();
+function joinNaturalList(items: string[]): string {
+    const unique = [...new Set(items.map((item) => item.trim()).filter(Boolean))];
+    if (unique.length === 0) return '';
+    if (unique.length === 1) return unique[0];
+    if (unique.length === 2) return `${unique[0]} and ${unique[1]}`;
+    return `${unique.slice(0, -1).join(', ')}, and ${unique[unique.length - 1]}`;
+}
 
-    if (/(src\/(agent|managers|extension|analyzer)|worksignalmanager|gitmanager|sessionmanager|agenticbrain)/i.test(fileBlob)) {
-        return 'it changes core drafting or signal-tracking behavior, so future drafts should reflect real work more accurately.';
+function inferWhyItMatters(analysis: CommitAnalysis, scoreReasons: string[] = [], fileCategories: string = ''): string {
+    const fileBlob = (analysis.changedFiles ?? []).join(' ').toLowerCase();
+    const reasonBlob = scoreReasons.join(' ').toLowerCase();
+    const categoryBlob = fileCategories.toLowerCase();
+    const themes: string[] = [];
+
+    if (/(worksignalmanager|gitmanager)/i.test(fileBlob) || /(meaningful commit evidence|commit signal in session|failed command later succeeded|focus missing)/i.test(reasonBlob)) {
+        themes.push('when DevGhost decides work is meaningful enough to suggest a draft');
+    }
+
+    if (/(agenticbrain|promptbuilder|gemini)/i.test(fileBlob)) {
+        themes.push('the quality and specificity of generated drafts');
+    }
+
+    if (/(keymanager|gemini)/i.test(fileBlob) || (/config/.test(categoryBlob) && /api key|model|validation|fallback/i.test(reasonBlob))) {
+        themes.push('AI setup reliability and model selection');
+    }
+
+    if (/(contextmanager|sessionmanager|historymanager)/i.test(fileBlob) || /session|focus|history/i.test(reasonBlob)) {
+        themes.push('the context DevGhost uses before drafting');
+    }
+
+    if (/extension\.ts/i.test(fileBlob) && /(review|draft|open x)/i.test(`${analysis.message} ${reasonBlob}`)) {
+        themes.push('the review-first flow users see before opening an X draft');
+    }
+
+    if (themes.length > 0) {
+        return `This affects ${joinNaturalList(themes.slice(0, 2))}.`;
     }
 
     if (analysis.workType === 'feature') {
@@ -274,11 +305,34 @@ function inferWhyItMatters(analysis: CommitAnalysis): string {
     return 'why not clear from available evidence';
 }
 
-function inferUserFacingResult(analysis: CommitAnalysis): string {
+function inferUserFacingResult(analysis: CommitAnalysis, scoreReasons: string[] = [], fileCategories: string = ''): string {
     const fileBlob = (analysis.changedFiles ?? []).join(' ').toLowerCase();
+    const reasonBlob = scoreReasons.join(' ').toLowerCase();
+    const categoryBlob = fileCategories.toLowerCase();
+    const themes: string[] = [];
 
-    if (/(src\/(agent|managers|extension|analyzer)|worksignalmanager|gitmanager|sessionmanager|agenticbrain)/i.test(fileBlob)) {
-        return 'review-first draft behavior should mirror the work signal more accurately.';
+    if (/(worksignalmanager|gitmanager)/i.test(fileBlob) || /(meaningful commit evidence|commit signal in session|failed command later succeeded|focus missing)/i.test(reasonBlob)) {
+        themes.push('DevGhost should be better at deciding when to suggest a draft');
+    }
+
+    if (/(agenticbrain|promptbuilder|gemini)/i.test(fileBlob)) {
+        themes.push('drafts should be more specific and less generic');
+    }
+
+    if (/(keymanager|gemini)/i.test(fileBlob) || (/config/.test(categoryBlob) && /api key|model|validation|fallback/i.test(reasonBlob))) {
+        themes.push('AI setup should fail or recover more clearly');
+    }
+
+    if (/(contextmanager|sessionmanager|historymanager)/i.test(fileBlob) || /session|focus|history/i.test(reasonBlob)) {
+        themes.push('DevGhost should have better session context before drafting');
+    }
+
+    if (/extension\.ts/i.test(fileBlob) && /(review|draft|open x)/i.test(`${analysis.message} ${reasonBlob}`)) {
+        themes.push('the review-first flow should feel smoother and safer');
+    }
+
+    if (themes.length > 0) {
+        return joinNaturalList(themes.slice(0, 2));
     }
 
     if (analysis.workType === 'feature') {
@@ -385,6 +439,7 @@ type DraftFlowOptions = {
     automatic?: boolean;
     eventKey?: string;
     onOpen?: () => Promise<void> | void;
+    offerAddFocus?: boolean;
 };
 
 type AutomaticDraftGateOptions = {
@@ -579,10 +634,18 @@ async function runDraftFlow(options: DraftFlowOptions): Promise<void> {
 
         const selection = await vscode.window.showInformationMessage(
             AUTO_DRAFT_PROMPT_TEXT,
-            'Review draft',
-            'Dismiss',
-            'Snooze'
+            ...(options.offerAddFocus
+                ? ['Add focus', 'Review draft', 'Dismiss', 'Snooze']
+                : ['Review draft', 'Dismiss', 'Snooze'])
         );
+
+        if (selection === 'Add focus') {
+            await contextManager?.setFocus();
+            const updatedFocus = contextManager?.getConfig()?.currentFocus?.trim() || '';
+            if (updatedFocus) {
+                workSignalManager?.recordFocus(updatedFocus);
+            }
+        }
 
         if (selection === 'Snooze') {
             await snoozeAutoDraftPrompts();
@@ -590,7 +653,7 @@ async function runDraftFlow(options: DraftFlowOptions): Promise<void> {
             return;
         }
 
-        if (selection !== 'Review draft') {
+        if (selection !== 'Review draft' && selection !== 'Add focus') {
             return;
         }
     }
@@ -682,7 +745,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.subscriptions.push(outputChannel);
 
     // Welcome message
-    const version = vscode.extensions.getExtension('devghost.devghost')?.packageJSON.version || '3.3.5';
+    const version = vscode.extensions.getExtension('devghost.devghost')?.packageJSON.version || '3.3.6';
     outputChannel.appendLine('═══════════════════════════════════════════════════');
     outputChannel.appendLine(`  DevGhost ${version} - Quiet build-in-public companion`);
     outputChannel.appendLine('═══════════════════════════════════════════════════');
@@ -1469,22 +1532,25 @@ async function handleCommitDetected(analysis: CommitAnalysis): Promise<void> {
     }
 
     const scoreDecision = consumeAutomaticDraftDecision(eventKey);
-    const currentFocus = contextManager?.getConfig()?.currentFocus || '';
+    const currentFocusBeforePrompt = contextManager?.getConfig()?.currentFocus?.trim() || '';
     const freshTerminalFriction = sessionManager?.getRecentFrictionSummary(30) || undefined;
     const touchedSymbols = workSignalManager?.getRecentTouchedSymbols(10) || [];
     const { compactDiffSummary, fileCategories } = buildCompactCommitSummary(analysis);
     const compactDiffStat = analysis.diffStat ? analysis.diffStat.split('\n').slice(0, 12).join('\n') : undefined;
-    const whyItMatters = inferWhyItMatters(analysis);
-    const userFacingResult = inferUserFacingResult(analysis);
+    const scoreReasons = scoreDecision?.reasons?.slice(0, 8) || [];
+    const whyItMatters = inferWhyItMatters(analysis, scoreReasons, fileCategories);
+    const userFacingResult = inferUserFacingResult(analysis, scoreReasons, fileCategories);
 
     await runDraftFlow({
         automatic: true,
         eventKey,
         label: 'Commit draft',
+        offerAddFocus: !currentFocusBeforePrompt,
         createDraft: async () => {
             if (!agenticBrain) return null;
             
             const baseline = contextManager?.getBaselineSummary() || '(no project context)';
+            const currentFocus = contextManager?.getConfig()?.currentFocus?.trim() || '';
             
             // Build the story context
             const result = await agenticBrain.process_trigger('COMMIT_DETECTED', {
