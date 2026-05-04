@@ -2,7 +2,7 @@
   "name": "devghost",
   "displayName": "DevGhost",
   "description": "A quiet build-in-public companion that watches real coding activity and suggests drafts for review.",
-  "version": "3.3.6",
+  "version": "3.3.8",
   "publisher": "devghost",
   "repository": {
     "type": "git",

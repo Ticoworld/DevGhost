@@ -30,6 +30,7 @@ type DeepWorkWrapUpContext = {
 };
 
 type CommitStoryContext = {
+    projectName: string;
     baselineSummary: string;
     commitMessage: string;
     changedFiles: string[];
@@ -46,11 +47,13 @@ type CommitStoryContext = {
     fileCategories?: string;
     whyItMatters?: string;
     userFacingResult?: string;
+    focusIsPossiblyStale?: boolean;
+    focusConflictNote?: string;
 };
 
 export type BrainResult = 
     | { ok: true; tweet: string }
-    | { ok: false; reason: "NO_KEY" | "CLIENT_NOT_READY" | "API_ERROR" | "NO_CONTEXT" | "MODEL_EMPTY_RESPONSE"; message: string };
+    | { ok: false; reason: "NO_KEY" | "CLIENT_NOT_READY" | "API_ERROR" | "NO_CONTEXT" | "MODEL_EMPTY_RESPONSE"; message: string; technicalError?: string };
 
 /**
  * AgenticBrain - Draft orchestrator
@@ -129,11 +132,12 @@ export class AgenticBrain {
                 return { 
                     ok: false, 
                     reason: "API_ERROR", 
-                    message: "This AI key has no available usage left." 
+                    message: "This AI key has no available usage left.",
+                    technicalError: errMsg,
                 };
             }
             
-            return { ok: false, reason: "API_ERROR", message: `DevGhost could not reach the AI service.` };
+            return { ok: false, reason: "API_ERROR", message: `DevGhost could not reach the AI service.`, technicalError: errMsg };
         }
     }
 
@@ -274,60 +278,102 @@ export class AgenticBrain {
 
     private buildCommitStoryPrompt(baseline: string, ctx: CommitStoryContext): string {
         const fileList = (ctx.changedFiles ?? []).slice(0, 15).map(f => `- ${f}`).join('\n');
-        const scoreReasons = (ctx.scoreReasons ?? []).slice(0, 8).map((reason) => `- ${reason}`).join('\n') || '(not available)';
-        const touchedSymbols = (ctx.touchedSymbols ?? []).slice(0, 10).join(', ') || '(not available)';
-        
+
         return [
-            'You are DevGhost, an assistant for developers building in public.',
             'Write ONLY the draft text (max 280 chars). No explanations.',
             'If not worth sharing, respond: NULL',
             '',
-            'STRICT STYLE RULES:',
-            '- Write like a developer casually explaining what actually happened.',
-            '- Be specific. Use plain English. No hype. No fake excitement.',
-            '- NO: "excited to announce", "love those moments", "sank into deep work", "hyper-focused".',
-            '- NO generic motivational captions or forced hashtags.',
-            '- Do not write generic shipping updates.',
-            '- Do not copy the commit message shape.',
-            '- Do not use weak filler phrases like "spent a bit of time", "some new", "a lot better", "hoping this makes", "big update", "lots of changes", "feels good", "laid out", "updated X logic", or "context features" unless the evidence is specific.',
-            '- Do not use hashtags.',
-            '- Do not invent emotion.',
-            '- Do not say "I hope" unless uncertainty is the actual point.',
-            '- Write one concrete issue/fix/result.',
-            '- Prefer specific files/functions/signals over vague "logic" or "features".',
-            '- If evidence is weak, write a smaller factual draft instead of a broader claim.',
-            '- Use lower-case where it feels natural for a dev text.',
+            'GROUNDING RULES:',
+            '- Current project and current commit are the only source of truth.',
+            '- Use CURRENT PROJECT only for grounding. You do not have to mention the project name in the post unless it sounds natural.',
+            '- Write only about CURRENT PROJECT and CURRENT COMMIT. Never write about DevGhost unless CURRENT PROJECT is DevGhost.',
+            '- Background context is optional.',
+            '- Background context must never override CURRENT PROJECT or CURRENT COMMIT.',
+            '- If background context conflicts with current commit evidence, ignore the background context.',
+            '- If background context mentions a different project name, ignore that part.',
+            '- Current project and current commit are the source of truth.',
+            '- Never copy names, features, or product ideas from examples.',
+            '- Never write about the example project.',
+            '- Never mention DevGhost unless CURRENT PROJECT is DevGhost.',
+            '- Never mention Matterkeep unless CURRENT PROJECT is Matterkeep.',
+            '- If examples conflict with current commit evidence, ignore the examples.',
+            '- Current commit evidence overrides examples.',
+            '- Current commit evidence overrides stale focus.',
+            '- Focus is optional context, not truth.',
+            '- If focus conflicts with commit evidence, trust the commit.',
             '',
-            'STRUCTURE PREFERENCE:',
-            '- Line 1: what changed, plainly.',
-            '- Line 2: what was wrong or why it mattered.',
-            '- Line 3: what works differently now.',
-            '- Do not force labels like Problem, Solution, or Result.',
+            'CURRENT PROJECT:',
+            ctx.projectName,
+            'CURRENT COMMIT:',
+            ctx.commitMessage,
             '',
-            'PROJECT BASELINE:',
+            'BACKGROUND CONTEXT, USE ONLY IF CONSISTENT:',
             baseline,
             '',
-            'EVENT: COMMIT_DETECTED',
-            `Work Type: ${ctx.workType}`,
-            `Focus: ${ctx.focus?.trim() || '(none)'}`,
-            `Commit Message (evidence only, do not paraphrase): "${ctx.commitMessage}"`,
-            `Score Reasons (context only):`,
-            scoreReasons,
-            `Touched Symbols/Functions: ${touchedSymbols}`,
-            `File Categories: ${ctx.fileCategories || '(not inferred)'}`,
-            `Compact Diff Summary: ${ctx.compactDiffSummary || '(not clear from available evidence)'}`,
-            `Stats: +${ctx.additions} / -${ctx.deletions} lines`,
-            `Session Duration: ${ctx.sessionMinutes} minutes`,
-            `Why it matters: ${ctx.whyItMatters || 'why not clear from available evidence'}`,
-            `User-facing result: ${ctx.userFacingResult || 'why not clear from available evidence'}`,
+            'WORK TYPE:',
+            ctx.workType,
             '',
-            'Changed Files:',
+            'CHANGED FILES:',
             fileList || '(none)',
             '',
-            ctx.diffStat ? `Diff Stat:\n${ctx.diffStat}\n` : '',
-            ctx.terminalFriction ? `Fresh terminal friction:\n${ctx.terminalFriction}\n` : '',
+            `COMPACT DIFF: ${ctx.compactDiffSummary || '(not clear from available evidence)'}`,
+            `FILE CATEGORIES: ${ctx.fileCategories || '(not inferred)'}`,
             '',
-            'Write the draft (specific, evidence-based, no hype, no hashtag):',
+            'WHY THIS MATTERS:',
+            ctx.whyItMatters || 'why not clear from available evidence',
+            '',
+            'USER-FACING RESULT:',
+            ctx.userFacingResult || 'why not clear from available evidence',
+            '',
+            'CURRENT FOCUS (optional):',
+            ctx.focus?.trim() || '(none)',
+            ctx.focusConflictNote ? `Focus status: ${ctx.focusConflictNote}` : 'Focus status: no conflict detected.',
+            '',
+            'STYLE RULES:',
+            '- Write like a developer sharing a clear progress update.',
+            '- Plain, specific, and natural. Not stiff. Not sloppy. Not hype.',
+            '- Prefer sentence-case.',
+            '- Avoid internal session-summary wording.',
+            '- Avoid "this session" unless the time block itself is the story.',
+            '- Avoid "wired up" unless it is the most accurate technical phrase.',
+            '- Prefer "built", "implemented", "connected", "fixed", "improved", or "made X work" when accurate.',
+            '- Match the clarity and plainness of the examples below, not their exact wording.',
+            '- One clear delta.',
+            '- Before/after contrast when possible.',
+            '- One-line payoff.',
+            '- Short, natural technical founder/developer tone.',
+            '- No forced hashtags.',
+            '- No corporate language.',
+            '- No generic filler.',
+            '- No copying commit messages.',
+            '- No file/function names unless they are the punchline.',
+            '- Do not list changed files.',
+            '- Translate internals into product or user behavior.',
+            '- Keep it 2 to 3 short sentences unless the evidence needs less.',
+            '- Avoid: spent a bit of time, some new, hoping this makes, feels good, big update, lots of changes, improved X today, it should now be better at, enhanced, optimized, core logic, commit-message-shaped prose.',
+            '',
+            'NEUTRAL EXAMPLES:',
+            'These examples are style examples only. Never copy their project names, product names, features, or subject matter. Use only CURRENT PROJECT and CURRENT COMMIT as factual truth.',
+            '1. Built out the main dashboard flow.',
+            '',
+            'The old screens were still disconnected, so it was hard to see how the admin path worked end to end.',
+            '',
+            'Now the layout, navigation, and review pages have a real structure to build on.',
+            '',
+            '2. Fixed a quiet automation issue.',
+            '',
+            'The watcher was seeing the event, but it was not using it to decide whether the update was worth suggesting.',
+            '',
+            'Now it checks the signal first, then asks for review before doing anything else.',
+            '',
+            '3. Tightened the request workflow.',
+            '',
+            'The old path collected the data, but it did not make the next state clear.',
+            '',
+            'Now each request has a cleaner path from submission to review.',
+            '',
+            'FINAL OUTPUT INSTRUCTION:',
+            'Write the draft now.',
         ].join('\n');
     }
 

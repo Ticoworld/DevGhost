@@ -36,7 +36,7 @@ let workspaceState: vscode.Memento | undefined;
 let lastAutomaticDraftDecision: { eventKey: string; decision: AutomaticDraftDecision } | null = null;
 
 // Phase 8: Agentic Intelligence
-import { AgenticBrain } from './agent/AgenticBrain';
+import { AgenticBrain, type BrainResult } from './agent/AgenticBrain';
 import { AgentTools } from './agent/AgentTools';
 
 let agenticBrain: AgenticBrain | undefined;
@@ -260,14 +260,94 @@ function joinNaturalList(items: string[]): string {
     return `${unique.slice(0, -1).join(', ')}, and ${unique[unique.length - 1]}`;
 }
 
-function inferWhyItMatters(analysis: CommitAnalysis, scoreReasons: string[] = [], fileCategories: string = ''): string {
+function isDevGhostProjectName(projectName: string = ''): boolean {
+    return projectName.toLowerCase().includes('devghost');
+}
+
+function normalizeComparableText(value: string): string {
+    return value
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function buildFocusConflictNote(focus: string, analysis: CommitAnalysis, fileCategories: string = ''): string | null {
+    const trimmedFocus = focus.trim();
+    if (!trimmedFocus) {
+        return null;
+    }
+
+    const normalizedFocus = normalizeComparableText(trimmedFocus);
+    if (!normalizedFocus) {
+        return null;
+    }
+
+    const normalizedEvidence = normalizeComparableText([
+        analysis.message,
+        ...(analysis.changedFiles ?? []),
+        fileCategories,
+    ].join(' '));
+
+    if (!normalizedEvidence) {
+        return null;
+    }
+
+    if (normalizedEvidence.includes(normalizedFocus)) {
+        return null;
+    }
+
+    const focusNoiseTokens = new Set([
+        'the',
+        'and',
+        'for',
+        'with',
+        'from',
+        'this',
+        'that',
+        'page',
+        'pages',
+        'app',
+        'project',
+        'work',
+        'thing',
+        'things',
+        'update',
+        'feature',
+        'features',
+        'screen',
+        'screens',
+        'view',
+        'views',
+    ]);
+    const focusTokens = normalizedFocus.split(' ').filter((token) => token.length > 3 && !focusNoiseTokens.has(token));
+    if (focusTokens.length === 0) {
+        return null;
+    }
+
+    if (focusTokens.some((token) => normalizedEvidence.includes(token))) {
+        return null;
+    }
+
+    return 'possibly stale; commit evidence overrides focus';
+}
+
+function inferWhyItMatters(
+    analysis: CommitAnalysis,
+    scoreReasons: string[] = [],
+    fileCategories: string = '',
+    projectName: string = ''
+): string {
     const fileBlob = (analysis.changedFiles ?? []).join(' ').toLowerCase();
     const reasonBlob = scoreReasons.join(' ').toLowerCase();
     const categoryBlob = fileCategories.toLowerCase();
+    const devGhostProject = isDevGhostProjectName(projectName);
     const themes: string[] = [];
 
     if (/(worksignalmanager|gitmanager)/i.test(fileBlob) || /(meaningful commit evidence|commit signal in session|failed command later succeeded|focus missing)/i.test(reasonBlob)) {
-        themes.push('when DevGhost decides work is meaningful enough to suggest a draft');
+        themes.push(devGhostProject
+            ? 'when DevGhost decides work is meaningful enough to suggest a draft'
+            : 'the workflow for deciding when a draft is worth suggesting');
     }
 
     if (/(agenticbrain|promptbuilder|gemini)/i.test(fileBlob)) {
@@ -279,11 +359,15 @@ function inferWhyItMatters(analysis: CommitAnalysis, scoreReasons: string[] = []
     }
 
     if (/(contextmanager|sessionmanager|historymanager)/i.test(fileBlob) || /session|focus|history/i.test(reasonBlob)) {
-        themes.push('the context DevGhost uses before drafting');
+        themes.push(devGhostProject
+            ? 'the context DevGhost uses before drafting'
+            : 'the context the app uses before drafting');
     }
 
     if (/extension\.ts/i.test(fileBlob) && /(review|draft|open x)/i.test(`${analysis.message} ${reasonBlob}`)) {
-        themes.push('the review-first flow users see before opening an X draft');
+        themes.push(devGhostProject
+            ? 'the review-first flow users see before opening an X draft'
+            : 'the review-first flow users see before opening a draft');
     }
 
     if (themes.length > 0) {
@@ -305,14 +389,22 @@ function inferWhyItMatters(analysis: CommitAnalysis, scoreReasons: string[] = []
     return 'why not clear from available evidence';
 }
 
-function inferUserFacingResult(analysis: CommitAnalysis, scoreReasons: string[] = [], fileCategories: string = ''): string {
+function inferUserFacingResult(
+    analysis: CommitAnalysis,
+    scoreReasons: string[] = [],
+    fileCategories: string = '',
+    projectName: string = ''
+): string {
     const fileBlob = (analysis.changedFiles ?? []).join(' ').toLowerCase();
     const reasonBlob = scoreReasons.join(' ').toLowerCase();
     const categoryBlob = fileCategories.toLowerCase();
+    const devGhostProject = isDevGhostProjectName(projectName);
     const themes: string[] = [];
 
     if (/(worksignalmanager|gitmanager)/i.test(fileBlob) || /(meaningful commit evidence|commit signal in session|failed command later succeeded|focus missing)/i.test(reasonBlob)) {
-        themes.push('DevGhost should be better at deciding when to suggest a draft');
+        themes.push(devGhostProject
+            ? 'DevGhost should be better at deciding when to suggest a draft'
+            : 'the app should be better at deciding when to suggest a draft');
     }
 
     if (/(agenticbrain|promptbuilder|gemini)/i.test(fileBlob)) {
@@ -324,7 +416,9 @@ function inferUserFacingResult(analysis: CommitAnalysis, scoreReasons: string[] 
     }
 
     if (/(contextmanager|sessionmanager|historymanager)/i.test(fileBlob) || /session|focus|history/i.test(reasonBlob)) {
-        themes.push('DevGhost should have better session context before drafting');
+        themes.push(devGhostProject
+            ? 'DevGhost should have better session context before drafting'
+            : 'the app should have better session context before drafting');
     }
 
     if (/extension\.ts/i.test(fileBlob) && /(review|draft|open x)/i.test(`${analysis.message} ${reasonBlob}`)) {
@@ -435,12 +529,61 @@ async function getTop3DiffsForDeepWork(workspaceRoot: string): Promise<string[]>
 
 type DraftFlowOptions = {
     label: string;
-    createDraft: () => Promise<string | null>;
+    createDraft: () => Promise<DraftFlowOutcome>;
     automatic?: boolean;
     eventKey?: string;
     onOpen?: () => Promise<void> | void;
     offerAddFocus?: boolean;
 };
+
+type DraftFlowFailureReason = Exclude<Extract<BrainResult, { ok: false }>['reason'], undefined>;
+
+type DraftFlowFailure = {
+    ok: false;
+    reason: DraftFlowFailureReason;
+    message: string;
+    technicalError?: string;
+};
+
+type DraftFlowOutcome = string | DraftFlowFailure | null;
+
+function isDraftFlowFailure(value: DraftFlowOutcome): value is DraftFlowFailure {
+    return !!value && typeof value === 'object' && 'ok' in value && value.ok === false;
+}
+
+function formatDraftFailureLogMessage(failure: DraftFlowFailure): string {
+    switch (failure.reason) {
+        case 'NO_KEY':
+            return 'AI key is missing.';
+        case 'CLIENT_NOT_READY':
+            return 'AI client is not ready.';
+        case 'NO_CONTEXT':
+            return 'project context is missing.';
+        case 'MODEL_EMPTY_RESPONSE':
+            return 'AI returned an empty draft.';
+        case 'API_ERROR':
+            return failure.message || 'AI request failed.';
+    }
+
+    return failure.message;
+}
+
+function formatDraftFailurePopupMessage(failure: DraftFlowFailure): string {
+    switch (failure.reason) {
+        case 'NO_KEY':
+            return 'AI key is missing.';
+        case 'CLIENT_NOT_READY':
+            return 'AI client is not ready.';
+        case 'NO_CONTEXT':
+            return 'project context is missing.';
+        case 'MODEL_EMPTY_RESPONSE':
+            return 'AI returned an empty draft.';
+        case 'API_ERROR':
+            return 'AI request failed.';
+    }
+
+    return failure.message;
+}
 
 type AutomaticDraftGateOptions = {
     trigger: 'PROJECT_LAUNCH' | 'PROJECT_RESUME' | 'FRICTION_BREAKTHROUGH' | 'DEEP_WORK_WRAP_UP' | 'WARMUP_RETURN' | 'SILENCE_BREAKER' | 'COMMIT_DETECTED' | 'FOCUS_INTENT';
@@ -666,7 +809,7 @@ async function runDraftFlow(options: DraftFlowOptions): Promise<void> {
         return;
     }
 
-    let draft: string | null;
+    let draft: DraftFlowOutcome;
     try {
         draft = await options.createDraft();
     } catch (error) {
@@ -678,6 +821,16 @@ async function runDraftFlow(options: DraftFlowOptions): Promise<void> {
             vscode.window.showErrorMessage('DevGhost: This AI key has no available usage left.');
         } else if (!options.automatic) {
             vscode.window.showErrorMessage('DevGhost: DevGhost could not reach the AI service.');
+        }
+        return;
+    }
+    if (isDraftFlowFailure(draft)) {
+        outputChannel?.appendLine(`[DevGhost] ${options.label} failed: ${formatDraftFailureLogMessage(draft)}`);
+        if (draft.technicalError) {
+            outputChannel?.appendLine(`[DevGhost] ${options.label} raw error: ${draft.technicalError}`);
+        }
+        if (!options.automatic) {
+            vscode.window.showErrorMessage(`DevGhost: ${formatDraftFailurePopupMessage(draft)}`);
         }
         return;
     }
@@ -1532,14 +1685,16 @@ async function handleCommitDetected(analysis: CommitAnalysis): Promise<void> {
     }
 
     const scoreDecision = consumeAutomaticDraftDecision(eventKey);
+    const projectName = contextManager?.getConfig()?.projectName?.trim() || 'the app';
     const currentFocusBeforePrompt = contextManager?.getConfig()?.currentFocus?.trim() || '';
     const freshTerminalFriction = sessionManager?.getRecentFrictionSummary(30) || undefined;
     const touchedSymbols = workSignalManager?.getRecentTouchedSymbols(10) || [];
     const { compactDiffSummary, fileCategories } = buildCompactCommitSummary(analysis);
     const compactDiffStat = analysis.diffStat ? analysis.diffStat.split('\n').slice(0, 12).join('\n') : undefined;
     const scoreReasons = scoreDecision?.reasons?.slice(0, 8) || [];
-    const whyItMatters = inferWhyItMatters(analysis, scoreReasons, fileCategories);
-    const userFacingResult = inferUserFacingResult(analysis, scoreReasons, fileCategories);
+    const focusConflictNote = buildFocusConflictNote(currentFocusBeforePrompt, analysis, fileCategories);
+    const whyItMatters = inferWhyItMatters(analysis, scoreReasons, fileCategories, projectName);
+    const userFacingResult = inferUserFacingResult(analysis, scoreReasons, fileCategories, projectName);
 
     await runDraftFlow({
         automatic: true,
@@ -1554,6 +1709,7 @@ async function handleCommitDetected(analysis: CommitAnalysis): Promise<void> {
             
             // Build the story context
             const result = await agenticBrain.process_trigger('COMMIT_DETECTED', {
+                projectName,
                 baselineSummary: baseline,
                 commitMessage: analysis.message,
                 changedFiles: analysis.changedFiles,
@@ -1570,9 +1726,27 @@ async function handleCommitDetected(analysis: CommitAnalysis): Promise<void> {
                 fileCategories,
                 whyItMatters,
                 userFacingResult,
+                focusConflictNote: focusConflictNote || undefined,
             });
 
-            return result.ok ? result.tweet : null;
+            if (result.ok) {
+                return result.tweet;
+            }
+
+            return {
+                ok: false,
+                reason: result.reason,
+                message: result.reason === 'API_ERROR'
+                    ? `AI request failed: ${result.message}`
+                    : result.reason === 'NO_KEY'
+                        ? 'AI key is missing.'
+                        : result.reason === 'CLIENT_NOT_READY'
+                            ? 'AI client is not ready.'
+                            : result.reason === 'NO_CONTEXT'
+                                ? 'project context is missing.'
+                                : 'AI returned an empty draft.',
+                technicalError: result.technicalError,
+            };
         }
     });
 }

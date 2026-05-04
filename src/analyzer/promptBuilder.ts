@@ -30,9 +30,10 @@ export class PromptBuilder {
 FUZZY TIME RULES (critical):
 - NEVER use exact minutes (e.g., "61 mins", "1218 minutes"). Use human time: "an hour", "over an hour", "a few hours", "all day", "the whole weekend".
 - NEVER count bugs/errors numerically in the draft (e.g., "3 errors" → "a few bugs", "1 thing" not "1 things").
-- Be casual. Sound like texting a dev friend, not a status report.
+- Be casual and clear. Sound like a real developer sharing updates, not a status report.
 
-TONE: Informal, lower-case is okay, dev slang (e.g., 'refactored', 'stuck', 'pain').
+TONE: Informal is okay. Dev slang (e.g., 'refactored', 'stuck', 'pain') is fine when it helps.
+- Prefer sentence-case unless the specific prompt asks for lowercase.
 - Do not add hashtags unless the specific prompt asks for one.
 - Be authentic, not corporate. Sound like a real dev.`;
 
