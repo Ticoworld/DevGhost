@@ -599,9 +599,43 @@ type AutomaticDraftGateOptions = {
     };
 };
 
+const COMMIT_FRESHNESS_GRACE_MS = 5 * 60 * 1000;
+
+function isFreshCommitForSession(commitAnalysis: CommitAnalysis): boolean {
+    if (commitAnalysis.classification === 'startup_baseline' || commitAnalysis.classification === 'historical_existing_commit') {
+        return false;
+    }
+
+    if (commitAnalysis.classification === 'fresh_commit') {
+        return true;
+    }
+
+    const commitTimestamp = commitAnalysis.committerDate || commitAnalysis.authorDate || null;
+    if (!commitTimestamp) {
+        return false;
+    }
+
+    const parsedTimestamp = Date.parse(commitTimestamp);
+    if (Number.isNaN(parsedTimestamp)) {
+        return false;
+    }
+
+    const sessionStartTime = sessionManager?.getSession().startTime;
+    if (!sessionStartTime) {
+        return false;
+    }
+
+    return parsedTimestamp >= (sessionStartTime.getTime() - COMMIT_FRESHNESS_GRACE_MS);
+}
+
 async function allowAutomaticDraft(options: AutomaticDraftGateOptions): Promise<boolean> {
     if (isDevGhostPaused()) {
         outputChannel?.appendLine(`[DevGhost] Auto draft skipped (${options.label}): DevGhost is paused.`);
+        return false;
+    }
+
+    if (options.trigger === 'COMMIT_DETECTED' && options.hints?.commitAnalysis && !isFreshCommitForSession(options.hints.commitAnalysis)) {
+        outputChannel?.appendLine(`[DevGhost] Auto draft skipped (${options.label}): Existing commit skipped: ${options.hints.commitAnalysis.hash} predates this DevGhost session.`);
         return false;
     }
 
@@ -898,7 +932,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.subscriptions.push(outputChannel);
 
     // Welcome message
-    const version = vscode.extensions.getExtension('devghost.devghost')?.packageJSON.version || '3.3.6';
+    const version = vscode.extensions.getExtension('devghost.devghost')?.packageJSON.version || '3.3.9';
     outputChannel.appendLine('═══════════════════════════════════════════════════');
     outputChannel.appendLine(`  DevGhost ${version} - Quiet build-in-public companion`);
     outputChannel.appendLine('═══════════════════════════════════════════════════');
@@ -926,7 +960,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.subscriptions.push(sessionManager);
 
     // Initialize the Git Manager (The Historian)
-    gitManager = new GitManager(outputChannel, sessionManager.getSession().startTime);
+    gitManager = new GitManager(outputChannel, context.workspaceState, sessionManager.getSession().startTime);
     gitManager.initialize();
     context.subscriptions.push(gitManager);
 
@@ -1654,6 +1688,11 @@ async function handleSilenceDetected(durationMinutes: number, strugglesCount: nu
  * Phase 7: Log commit events.
  */
 async function handleCommitDetected(analysis: CommitAnalysis): Promise<void> {
+    if (!isFreshCommitForSession(analysis)) {
+        outputChannel?.appendLine(`[DevGhost] Existing commit skipped: ${analysis.hash} predates this DevGhost session.`);
+        return;
+    }
+
     // Record commit for history + silence tracking (no automatic AI drafting on commit).
     historyManager?.logCommit(analysis.message);
     workSignalManager?.recordCommit(analysis);
