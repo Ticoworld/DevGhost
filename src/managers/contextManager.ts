@@ -153,7 +153,7 @@ export class ContextManager implements vscode.Disposable {
             if (commits.length > 0) {
                 this.outputChannel.appendLine(`[DevGhost] Caught up on ${commits.length} recent commits:`);
                 commits.forEach((commit: string) => {
-                    this.outputChannel.appendLine(`  • ${commit}`);
+                    this.outputChannel.appendLine(`  - ${commit}`);
                 });
 
                 const lastCommit = commits[0].replace(/^[a-f0-9]+\s+/, '');
@@ -361,7 +361,7 @@ export class ContextManager implements vscode.Disposable {
             this.config.currentFocus = inferredFocus;
             this.config.struggleStartTime = new Date().toISOString();
             await this.saveConfig();
-            this.outputChannel.appendLine(`[DevGhost] Focus shifted: "${oldFocus}" → "${inferredFocus}"`);
+            this.outputChannel.appendLine(`[DevGhost] Focus shifted: "${oldFocus}" -> "${inferredFocus}"`);
         }
     }
 

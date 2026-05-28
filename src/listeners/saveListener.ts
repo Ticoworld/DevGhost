@@ -247,10 +247,10 @@ export class SaveListener implements vscode.Disposable {
      */
     private generateFallbackTweet(filename: string, errorCount: number): string {
         const templates = [
-            `just mass-executed ${errorCount} error(s) in ${filename}. mass murderer vibes but make it dev 💀 #BuildInPublic`,
-            `debugging ${filename}: fixed ${errorCount} error(s). my brain cells didn't survive but the code did 🫠 #BuildInPublic`,
+            `just mass-executed ${errorCount} error(s) in ${filename}. mass murderer vibes but make it dev #BuildInPublic`,
+            `debugging ${filename}: fixed ${errorCount} error(s). my brain cells didn't survive but the code did #BuildInPublic`,
             `${errorCount} error(s) down in ${filename}. who said programming is relaxing? #BuildInPublic`,
-            `finally shipped ${filename} after ${errorCount} error(s). the struggle was real 😮‍💨 #BuildInPublic`,
+            `finally shipped ${filename} after ${errorCount} error(s). the struggle was real #BuildInPublic`,
         ];
         return templates[Math.floor(Math.random() * templates.length)];
     }

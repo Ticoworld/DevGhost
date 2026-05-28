@@ -132,7 +132,7 @@ export class SessionManager implements vscode.Disposable {
 
             if (!this.deepWorkWrapUpFired && this.totalActiveCodingMs >= this.deepWorkThresholdMs && this.onDeepWorkWrapUpCallback) {
                 this.deepWorkWrapUpFired = true;
-                this.outputChannel.appendLine(`[DevGhost] Deep work session (${this.deepWorkThresholdMinutes}+ min active coding) — triggering review-first wrap-up`);
+                this.outputChannel.appendLine(`[DevGhost] Deep work session (${this.deepWorkThresholdMinutes}+ min active coding) - triggering review-first wrap-up`);
                 Promise.resolve(this.onDeepWorkWrapUpCallback()).catch((err) => {
                     this.outputChannel.appendLine(`[DevGhost] Deep work wrap-up error: ${err}`);
                 });

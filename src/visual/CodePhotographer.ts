@@ -182,7 +182,7 @@ export class CodePhotographer {
         const buffer = canvasInstance.toBuffer('image/png');
         fs.writeFileSync(imagePath, buffer);
 
-        console.log(`[CodePhotographer] ✅ Image saved: ${imagePath}`);
+        console.log(`[CodePhotographer] [OK] Image saved: ${imagePath}`);
         return imagePath;
     }
 
@@ -283,8 +283,8 @@ export class CodePhotographer {
         const htmlPath = path.join(snapshotsDir, `code-${Date.now()}.html`);
         fs.writeFileSync(htmlPath, htmlContent);
 
-        console.log(`[CodePhotographer] ✅ HTML saved: ${htmlPath}`);
-        console.log(`[CodePhotographer] 📄 Opening HTML in default browser (Canvas not available - using safe mode)`);
+        console.log(`[CodePhotographer] [OK] HTML saved: ${htmlPath}`);
+        console.log(`[CodePhotographer] [INFO] Opening HTML in default browser (Canvas not available - using safe mode)`);
 
         // Open HTML in default browser (platform-specific)
         const cp = require('child_process');
@@ -301,9 +301,9 @@ export class CodePhotographer {
                 // Linux: use 'xdg-open' command
                 cp.exec(`xdg-open "${htmlPath}"`);
             }
-            console.log(`[CodePhotographer] ✅ HTML opened in browser`);
+            console.log(`[CodePhotographer] [OK] HTML opened in browser`);
         } catch (error) {
-            console.error(`[CodePhotographer] ⚠️ Failed to open browser: ${error}`);
+            console.error(`[CodePhotographer] [WARN] Failed to open browser: ${error}`);
             // Fallback: open in VS Code
             const uri = vscode.Uri.file(htmlPath);
             await vscode.commands.executeCommand('vscode.open', uri);
@@ -407,11 +407,11 @@ export class CodePhotographer {
     async copyImageToClipboard(imagePath: string): Promise<void> {
         // Check if it's an HTML file (fallback mode)
         if (imagePath.endsWith('.html')) {
-            console.log(`[CodePhotographer] 📄 HTML file opened in browser. Ready for screenshot.`);
+            console.log(`[CodePhotographer] [INFO] HTML file opened in browser. Ready for screenshot.`);
             // HTML already opened in browser by generateHTMLFallback
             // Just show a friendly message
             vscode.window.showInformationMessage(
-                `📸 Code preview opened in browser! Press Win+Shift+S (Windows) or Cmd+Shift+4 (Mac) to screenshot, then paste in Twitter.`,
+                `[SNAPSHOT] Code preview opened in browser! Press Win+Shift+S (Windows) or Cmd+Shift+4 (Mac) to screenshot, then paste in Twitter.`,
                 'Open File Location'
             ).then(selection => {
                 if (selection === 'Open File Location') {
@@ -443,9 +443,9 @@ export class CodePhotographer {
                 // Linux: use xclip
                 cp.execSync(`xclip -selection clipboard -t image/png -i "${imagePath}"`);
             }
-            console.log(`[CodePhotographer] ✅ Image copied to clipboard`);
+            console.log(`[CodePhotographer] [OK] Image copied to clipboard`);
         } catch (error) {
-            console.error(`[CodePhotographer] ⚠️ Failed to copy to clipboard: ${error}`);
+            console.error(`[CodePhotographer] [WARN] Failed to copy to clipboard: ${error}`);
             // Fallback: show file path
             vscode.window.showInformationMessage(`Image saved: ${imagePath}`);
         }
