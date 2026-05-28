@@ -34,22 +34,32 @@ DevGhost does not read file content line by line. When you choose to generate a 
 
 ## What gets sent to Gemini
 
-When you trigger a draft (manually or after DevGhost decides the signal is strong enough), the following may be sent to the Gemini API:
+Gemini is only called when a draft is generated — either when you trigger one manually or when DevGhost decides the session signal is strong enough. DevGhost never sends anything to Gemini on every save or edit.
 
-- Your current project name and goal
-- Your current focus
-- Recent commit message and basic change stats (additions, deletions, file count)
-- A summary of recently touched file types (not file content)
-- Your baseline project summary (which you generated when setting up the project)
+Depending on which draft flow runs, the following context may be included in the request:
 
-DevGhost does **not** send raw file diffs or full source code unless you explicitly generate a baseline that includes them.
+- Your project name, goal, and current focus (set by you)
+- Recent commit messages and change stats (additions, deletions, file count)
+- Changed file paths and file type summaries
+- Your baseline project summary (generated when you ran Set Up Project)
+- Terminal command outcomes (exit codes and command names — not full output)
+- Function, class, and interface names extracted from the active file
 
-DevGhost sanitizes obvious secrets (API keys, passwords, env-style patterns) and skips files in sensitive paths before assembling context. However, sanitization is not a guarantee. **Use DevGhost on personal or non-client repos until you are comfortable with what is being sent.**
+For the following flows, DevGhost also includes selected git diff excerpts:
+
+- **Draft From Recent Work** (`DevGhost: Draft From Recent Work`): sends uncommitted changes (`git diff HEAD`) for the active workspace, up to approximately 8,000 characters
+- **Deep work wrap-up** (fires automatically after a long focused session): sends diff excerpts for the three most-modified files since the last commit, up to approximately 15,000 characters combined
+
+All context passes through a sanitizer before being sent. The sanitizer removes lines that match common secret patterns (API keys, tokens, passwords, database URLs), redacts absolute file paths, skips files in sensitive locations (`.env`, `.pem`, `.key`, credential files), and strips binary content. Diffs are also truncated at a size limit.
+
+**Sanitization reduces risk but is not a guarantee.** Use DevGhost on personal or non-client repos until you are comfortable with what is included in requests.
 
 ## Privacy and trust
 
 - You bring your own Gemini API key
 - The key is stored in VS Code's SecretStorage — not in any file, not in logs, not sent anywhere by DevGhost
+- Project context and activity history are stored locally in VS Code's workspaceState, isolated per workspace
+- Gemini is only called when a draft is generated, not on every save or edit
 - Drafts are always shown for review before any action is taken
 - DevGhost never posts automatically
 - There is no cloud sync or external DevGhost server
@@ -87,6 +97,11 @@ Run `DevGhost: Clear AI Key` from the command palette. The key is removed from S
 5. Run `DevGhost: Set Current Focus` to tell DevGhost what you are working on.
 6. Code normally.
 7. When DevGhost detects enough signal, it will suggest a draft for review.
+
+## Support
+
+- [Open an issue on GitHub](https://github.com/Ticoworld/DevGhost/issues) for bug reports, questions, or feature requests
+- See [SUPPORT.md](SUPPORT.md) for what to include in a report
 
 ## Local development
 

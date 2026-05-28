@@ -4,11 +4,15 @@
   "description": "A VS Code extension that watches real coding activity and suggests build-in-public drafts for review. Review-first. Never posts automatically.",
   "version": "3.3.11",
   "preview": true,
-  "publisher": "devghost",
+  "publisher": "ticoworld",
   "repository": {
     "type": "git",
-    "url": "https://github.com/devghost/devghost"
+    "url": "https://github.com/Ticoworld/DevGhost"
   },
+  "bugs": {
+    "url": "https://github.com/Ticoworld/DevGhost/issues"
+  },
+  "homepage": "https://github.com/Ticoworld/DevGhost",
   "engines": {
     "vscode": "^1.85.0"
   },
