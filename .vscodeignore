@@ -29,3 +29,6 @@ TESTING.md
 .env*
 brain/**
 videos/**
+.github/**
+.claude/**
+audit_*.json
