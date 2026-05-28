@@ -4,6 +4,10 @@ DevGhost is a VS Code extension that watches real coding activity and suggests b
 
 This is a beta build.
 
+## Demo
+
+[![DevGhost demo: review-first draft flow](images/01-review-prompt.png)](https://youtu.be/K5C65atH3Xk)
+
 ## What it does
 
 - Watches local coding signals: file edits, saves, terminal commands, commit activity, and session timing
@@ -87,6 +91,14 @@ Run `DevGhost: Clear AI Key` from the command palette. The key is removed from S
 - No cloud sync
 - No billing management
 - No posting to any platform
+
+## Screenshots
+
+![DevGhost detects meaningful work and prompts for review](images/01-review-prompt.png)
+
+![Draft shown for review before any action is taken](images/02-draft-review.png)
+
+![Draft handed off to X compose — never posted automatically](images/03-x-draft-handoff.png)
 
 ## Quick start
 
