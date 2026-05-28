@@ -4,13 +4,15 @@
 
 The primary support path is [GitHub Issues](https://github.com/Ticoworld/DevGhost/issues).
 
+Issues use structured templates. When you open a new issue you will be prompted to choose between a **Bug report** and a **Feature request**. The templates guide you through what to include so nothing important is missing.
+
 Open an issue if you hit a bug, something behaves unexpectedly, or you have a question about how the extension works.
 
 ## What to include in a bug report
 
-The more specific you are, the faster the issue can be investigated.
+The bug report template will ask for these automatically. If you are filing outside the template, include:
 
-- The version of DevGhost (check the Extensions panel in VS Code)
+- The version of DevGhost (check the Extensions panel in your editor)
 - Your editor: VS Code, Cursor, or Antigravity, and the version
 - Your OS and version
 - A clear description of what you did and what happened

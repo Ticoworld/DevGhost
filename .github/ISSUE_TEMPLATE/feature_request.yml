@@ -1,0 +1,72 @@
+name: Feature request
+description: Suggest a behavior or improvement for DevGhost.
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        DevGhost is currently in **Preview/Beta**. Feature requests are welcome and help shape the roadmap.
+
+        Not every request will be added immediately. Please describe the problem clearly — that is more useful than a specific solution.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the situation where DevGhost falls short today. Be specific.
+      placeholder: "When I work across two repos in the same session, DevGhost only tracks activity in the first workspace I opened. I cannot get a combined draft."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed
+    attributes:
+      label: Proposed behavior
+      description: What would the improved behavior look like? Describe what you want to happen, not just what is missing.
+      placeholder: "DevGhost could track activity per workspace independently and let me choose which workspace to draft from when I trigger manually."
+    validations:
+      required: true
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: Current workaround
+      description: How are you handling this today, if at all?
+      placeholder: "I open each repo separately and trigger drafts individually. It works but is not ideal."
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which area does this touch?
+      description: Pick the closest match. This helps with triage.
+      options:
+        - Privacy or what is sent to Gemini
+        - AI call behavior or prompt quality
+        - Draft quality or content
+        - Work signal scoring
+        - Editor support (VS Code, Cursor, Antigravity, other)
+        - X / Twitter draft handoff
+        - Setup or onboarding
+        - Performance
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: Screenshots, related issues, or additional context.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: beta_acknowledgement
+    attributes:
+      label: Beta acknowledgement
+      options:
+        - label: I understand DevGhost is in Preview/Beta and may not add every request immediately.
+          required: true

@@ -1,0 +1,9 @@
+blank_issues_enabled: false
+
+contact_links:
+  - name: DevGhost support guide
+    url: https://github.com/Ticoworld/DevGhost/blob/main/SUPPORT.md
+    about: What to include in a report, what not to share, and how to handle privacy concerns.
+  - name: README and documentation
+    url: https://github.com/Ticoworld/DevGhost/blob/main/README.md
+    about: Setup guide, privacy details, what DevGhost watches, and what gets sent to Gemini.

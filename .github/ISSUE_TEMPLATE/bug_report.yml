@@ -1,0 +1,131 @@
+name: Bug report
+description: Something is not working as expected in DevGhost.
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before opening this report, run **DevGhost: Show Logs** and **DevGhost: Check AI Setup** in the command palette and have the output ready.
+
+        **Do not paste API keys, passwords, secrets, client code, or sensitive git diffs into this form.**
+
+  - type: input
+    id: devghost_version
+    attributes:
+      label: DevGhost version
+      description: Check the Extensions panel in your editor (e.g. 3.3.11).
+      placeholder: "3.3.11"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: editor
+    attributes:
+      label: Editor
+      description: Which editor are you using?
+      options:
+        - VS Code
+        - Cursor
+        - Antigravity
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: editor_version
+    attributes:
+      label: Editor version
+      description: The exact version of your editor (e.g. 1.89.1).
+      placeholder: "1.89.1"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      description: OS name and version (e.g. Windows 11, macOS 14.4, Ubuntu 22.04).
+      placeholder: "Windows 11"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which area does this affect?
+      description: Pick the closest match.
+      options:
+        - AI key setup or validation
+        - Draft quality or content
+        - Git commit detection
+        - X / Twitter draft handoff
+        - Install or package
+        - Privacy or data sent to Gemini
+        - Performance or hanging
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: What happened?
+      description: Describe what went wrong. Be specific about what you clicked or ran.
+      placeholder: "DevGhost showed a draft but the copy button did nothing."
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen instead?
+      placeholder: "The draft text should have been copied to my clipboard."
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: List the exact steps that lead to the problem.
+      placeholder: |
+        1. Open a repo with git history
+        2. Run DevGhost: Set Up Project
+        3. Make a commit
+        4. When the draft prompt appears, click Review draft
+        5. Click Copy draft — nothing happens
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: DevGhost logs
+      description: |
+        Run **DevGhost: Show Logs** in the command palette and paste the relevant lines here.
+        Review for file paths or project details you are not comfortable sharing and redact them before posting.
+      render: text
+      placeholder: |
+        [DevGhost] Session started
+        [DevGhost] Commit detected: abc1234
+        [DevGhost] Draft generation failed: ...
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: Screenshots, error messages, or any other context that helps.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I have not pasted any API keys, passwords, secrets, private client code, or sensitive git diffs into this report.
+          required: true
