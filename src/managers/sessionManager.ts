@@ -206,9 +206,9 @@ export class SessionManager implements vscode.Disposable {
                 }
             );
             this.disposables.push(shellExecutionListener);
-            this.outputChannel.appendLine('[DevGhost] ✓ Shell Integration monitoring enabled');
+            this.outputChannel.appendLine('[DevGhost] [OK] Shell Integration monitoring enabled');
         } catch (error) {
-            this.outputChannel.appendLine('[DevGhost] ⚠️ Shell Integration not available');
+            this.outputChannel.appendLine('[DevGhost] [WARN] Shell Integration not available');
         }
     }
 
@@ -276,7 +276,7 @@ export class SessionManager implements vscode.Disposable {
             this.recentFailures.shift();
         }
 
-        this.outputChannel.appendLine(`[DevGhost] ✗ Struggle recorded: "${this.truncate(event.command, 40)}"`);
+        this.outputChannel.appendLine(`[DevGhost] [FAIL] Struggle recorded: "${this.truncate(event.command, 40)}"`);
         this.outputChannel.appendLine(`[DevGhost] Active struggles: ${this.recentFailures.length}`);
     }
 
@@ -291,7 +291,7 @@ export class SessionManager implements vscode.Disposable {
         
         if (matchIndex === -1) {
             // No matching failure - this is unrelated success
-            this.outputChannel.appendLine(`[DevGhost] ✓ Success (unrelated): "${this.truncate(event.command, 40)}"`);
+        this.outputChannel.appendLine(`[DevGhost] [OK] Success (unrelated): "${this.truncate(event.command, 40)}"`);
             return;
         }
 
@@ -311,12 +311,12 @@ export class SessionManager implements vscode.Disposable {
         this.clearMatchingFailures(event);
 
         this.outputChannel.appendLine('');
-        this.outputChannel.appendLine('🎉 ═══════════════════════════════════════════');
+        this.outputChannel.appendLine('## [VERIFIED WIN]');
         this.outputChannel.appendLine('   VERIFIED WIN!');
         this.outputChannel.appendLine(`   Command: "${this.truncate(event.command, 40)}"`);
         this.outputChannel.appendLine(`   Failed ${failureCount}x before succeeding`);
         this.outputChannel.appendLine(`   Time to fix: ${durationMinutes}m ${durationSeconds}s`);
-        this.outputChannel.appendLine('═══════════════════════════════════════════ 🎉');
+        this.outputChannel.appendLine('--------------------------');
         this.outputChannel.appendLine('');
 
         // Trigger breakthrough callback

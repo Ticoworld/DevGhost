@@ -185,10 +185,10 @@ export class SaveListener implements vscode.Disposable {
      */
     private async triggerBreakthrough(filename: string, previousErrorCount: number): Promise<void> {
         this.outputChannel.appendLine('');
-        this.outputChannel.appendLine('🎉 ═══════════════════════════════════════════');
+        this.outputChannel.appendLine('## [BREAKTHROUGH DETECTED]');
         this.outputChannel.appendLine(`   BREAKTHROUGH DETECTED in ${filename}!`);
         this.outputChannel.appendLine(`   Fixed ${previousErrorCount} error(s)`);
-        this.outputChannel.appendLine('═══════════════════════════════════════════ 🎉');
+        this.outputChannel.appendLine('--------------------------');
         this.outputChannel.appendLine('');
 
         if (this.geminiService && this.geminiService.isInitialized()) {
@@ -214,9 +214,9 @@ export class SaveListener implements vscode.Disposable {
 
             this.outputChannel.appendLine('');
             this.outputChannel.appendLine('Generated Draft:');
-            this.outputChannel.appendLine('─────────────────────────────────────────────');
+        this.outputChannel.appendLine('--- Generated Draft ---');
             this.outputChannel.appendLine(tweet);
-            this.outputChannel.appendLine('─────────────────────────────────────────────');
+        this.outputChannel.appendLine('-----------------------');
             this.outputChannel.appendLine('');
 
             if (this.onTweetGeneratedCallback) {
@@ -224,16 +224,16 @@ export class SaveListener implements vscode.Disposable {
             }
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-            this.outputChannel.appendLine(`[DevGhost] ❌ Gemini failed: ${errorMessage}`);
+            this.outputChannel.appendLine(`[DevGhost] [ERROR] Gemini failed: ${errorMessage}`);
             
             // Use fallback draft so user can still review
             const fallbackTweet = this.generateFallbackTweet(filename, errorCount);
             this.outputChannel.appendLine('[DevGhost] Using fallback draft instead...');
             this.outputChannel.appendLine('');
             this.outputChannel.appendLine('Fallback Draft:');
-            this.outputChannel.appendLine('─────────────────────────────────────────────');
+            this.outputChannel.appendLine('--- Fallback Draft ---');
             this.outputChannel.appendLine(fallbackTweet);
-            this.outputChannel.appendLine('─────────────────────────────────────────────');
+            this.outputChannel.appendLine('----------------------');
             this.outputChannel.appendLine('');
 
             if (this.onTweetGeneratedCallback) {

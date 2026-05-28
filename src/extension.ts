@@ -150,7 +150,7 @@ function canDraftPostOrWarn(isManual?: boolean): boolean {
     if (!historyManager) return true;
     const ok = historyManager.canPostToday();
     if (!ok) {
-        outputChannel?.appendLine('[DevGhost] ⚠️ Daily draft limit reached (3 drafts / 24h). Aborting AI draft.');
+        outputChannel?.appendLine('[DevGhost] [WARN] Daily draft limit reached (3 drafts / 24h). Aborting AI draft.');
     }
     return ok;
 }
@@ -932,10 +932,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.subscriptions.push(outputChannel);
 
     // Welcome message
-    const version = vscode.extensions.getExtension('devghost.devghost')?.packageJSON.version || '3.3.9';
-    outputChannel.appendLine('═══════════════════════════════════════════════════');
-    outputChannel.appendLine(`  DevGhost ${version} - Quiet build-in-public companion`);
-    outputChannel.appendLine('═══════════════════════════════════════════════════');
+    const version = vscode.extensions.getExtension('devghost.devghost')?.packageJSON.version || '3.3.10';
+    outputChannel.appendLine('[DevGhost] ----------------------------------------');
+    outputChannel.appendLine(`[DevGhost] DevGhost ${version} - Quiet build-in-public companion`);
+    outputChannel.appendLine('[DevGhost] ----------------------------------------');
     outputChannel.appendLine('');
     outputChannel.appendLine('Watching real coding activity and drafting only when there is enough signal.');
     outputChannel.appendLine('Now tracking: COMMITS + CONTEXT + STORY');
@@ -1161,9 +1161,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             }
         );
         context.subscriptions.push(frictionListener);
-        outputChannel.appendLine('[DevGhost] ✓ Friction breakthrough tracking enabled');
+        outputChannel.appendLine('[DevGhost] [OK] Friction breakthrough tracking enabled');
     } catch {
-        outputChannel.appendLine('[DevGhost] ⚠️ Shell Integration not available (friction breakthrough disabled)');
+        outputChannel.appendLine('[DevGhost] [WARN] Shell Integration not available (friction breakthrough disabled)');
     }
 
     outputChannel.appendLine('[DevGhost] DevGhost is watching this workspace.');
@@ -1505,7 +1505,7 @@ function registerCommands(context: vscode.ExtensionContext): void {
                 vscode.window.showErrorMessage('DevGhost: No compatible AI model is available for this key.');
             } else if (errMsg.includes('429') || errMsg.toLowerCase().includes('quota exceeded')) {
                 const cleanMsg = "This AI key has no available usage left.";
-                outputChannel?.appendLine(`[DevGhost] ❌ ${cleanMsg}`);
+                outputChannel?.appendLine(`[DevGhost] [ERROR] ${cleanMsg}`);
                 outputChannel?.appendLine(`[DevGhost] Raw error: ${errMsg}`);
                 vscode.window.showErrorMessage(`DevGhost: ${cleanMsg}`);
             } else {
@@ -1810,7 +1810,7 @@ async function initializeGeminiFromStorage(): Promise<void> {
             reason: 'startup',
         });
         if (ready) {
-            outputChannel?.appendLine('[DevGhost] ✓ DevGhost is ready');
+            outputChannel?.appendLine('[DevGhost] [OK] DevGhost is ready');
         }
     } else if (apiKey && geminiService && !hasProjectContext) {
         outputChannel?.appendLine('[DevGhost] AI key loaded. Set up the project to generate a baseline.');
@@ -1849,6 +1849,6 @@ async function checkApiKeyOnStartup(): Promise<void> {
  * Extension deactivation.
  */
 export function deactivate(): void {
-    outputChannel?.appendLine('[DevGhost] Goodbye! Keep building. 👻');
+    outputChannel?.appendLine('[DevGhost] Goodbye! Keep building.');
 }
 

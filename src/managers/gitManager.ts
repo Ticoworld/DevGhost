@@ -95,7 +95,7 @@ export class GitManager implements vscode.Disposable {
             if (this.gitApi.repositories.length > 0) {
                 this.repository = this.gitApi.repositories[0];
                 await this.setupRepositoryWatcher();
-                this.outputChannel.appendLine('[DevGhost] âœ“ Git integration enabled');
+                this.outputChannel.appendLine('[DevGhost] [OK] Git integration enabled');
                 return true;
             }
 
@@ -104,7 +104,7 @@ export class GitManager implements vscode.Disposable {
                 if (!this.repository) {
                     this.repository = repo;
                     void this.setupRepositoryWatcher();
-                    this.outputChannel.appendLine('[DevGhost] âœ“ Git repository detected');
+                    this.outputChannel.appendLine('[DevGhost] [OK] Git repository detected');
                 }
             });
 
@@ -334,21 +334,19 @@ export class GitManager implements vscode.Disposable {
      */
     private processCommitAnalysis(analysis: CommitAnalysis): void {
         this.outputChannel.appendLine('');
-        this.outputChannel.appendLine('ðŸ“ â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•');
-        this.outputChannel.appendLine('   COMMIT DETECTED');
-        this.outputChannel.appendLine(`   Hash: ${analysis.hash}`);
-        this.outputChannel.appendLine(`   Message: "${analysis.message}"`);
-        this.outputChannel.appendLine(`   Changes: +${analysis.additions} / -${analysis.deletions} (${analysis.filesChanged} files)`);
-        this.outputChannel.appendLine('â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• ðŸ“');
+        this.outputChannel.appendLine('## [COMMIT DETECTED]');
+        this.outputChannel.appendLine('Hash: ' + analysis.hash);
+        this.outputChannel.appendLine('Message: ' + analysis.message);
+        this.outputChannel.appendLine('Changes: +' + analysis.additions + ' / -' + analysis.deletions + ' (' + analysis.filesChanged + ' files)');
+        this.outputChannel.appendLine('--------------------------');
 
         // Check for PIVOT
         if (analysis.isPivot) {
             this.outputChannel.appendLine('');
-            this.outputChannel.appendLine('ðŸ”¥ â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•');
-            this.outputChannel.appendLine('   PIVOT DETECTED!');
-            this.outputChannel.appendLine(`   Heavy refactor: -${analysis.deletions} lines`);
-            this.outputChannel.appendLine('   "What is the new vision?"');
-            this.outputChannel.appendLine('â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• ðŸ”¥');
+            this.outputChannel.appendLine('## [PIVOT DETECTED]');
+            this.outputChannel.appendLine('Heavy refactor: -' + analysis.deletions + ' lines');
+            this.outputChannel.appendLine('What is the new vision?');
+            this.outputChannel.appendLine('--------------------------');
             this.outputChannel.appendLine('');
 
             if (this.onPivotCallback) {
@@ -361,11 +359,10 @@ export class GitManager implements vscode.Disposable {
         // We still log it here for visibility, but the popup decision happens after Brain runs
         if (analysis.isDeepWork) {
             this.outputChannel.appendLine('');
-            this.outputChannel.appendLine('ðŸ† â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•');
-            this.outputChannel.appendLine('   DEEP WORK SESSION');
-            this.outputChannel.appendLine(`   ${analysis.sessionMinutes} minutes of focused work`);
-            this.outputChannel.appendLine('   Commit recorded. DevGhost will evaluate whether it is worth a draft.');
-            this.outputChannel.appendLine('â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• ðŸ†');
+            this.outputChannel.appendLine('## [DEEP WORK SESSION]');
+            this.outputChannel.appendLine(analysis.sessionMinutes + ' minutes of focused work');
+            this.outputChannel.appendLine('Commit recorded. DevGhost will evaluate whether it is worth a draft.');
+            this.outputChannel.appendLine('--------------------------------------------------------------------');
             this.outputChannel.appendLine('');
         }
 

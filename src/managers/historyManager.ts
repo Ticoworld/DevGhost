@@ -78,7 +78,7 @@ export class HistoryManager implements vscode.Disposable {
             this.logEvent('SESSION_START');
 
             this.initialized = true;
-            this.outputChannel.appendLine('[DevGhost] ✓ History manager initialized');
+            this.outputChannel.appendLine('[DevGhost] [OK] History manager initialized');
             return true;
         } catch (error) {
             this.outputChannel.appendLine(`[DevGhost] History init error: ${error}`);

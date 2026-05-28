@@ -22,3 +22,9 @@ vsc-extension-quickstart.md
 **/.eslintrc.json
 **/*.map
 **/*.ts
+TESTING.md
+*.py
+.env
+.env.*
+.env*
+brain/**

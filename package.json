@@ -1,8 +1,9 @@
 {
   "name": "devghost",
   "displayName": "DevGhost",
-  "description": "A quiet build-in-public companion that watches real coding activity and suggests drafts for review.",
-  "version": "3.3.9",
+  "description": "A VS Code extension that watches real coding activity and suggests build-in-public drafts for review. Review-first. Never posts automatically.",
+  "version": "3.3.11",
+  "preview": true,
   "publisher": "devghost",
   "repository": {
     "type": "git",
@@ -12,7 +13,18 @@
     "vscode": "^1.85.0"
   },
   "categories": [
+    "AI",
     "Other"
+  ],
+  "keywords": [
+    "build in public",
+    "developer diary",
+    "AI drafting",
+    "commit logger",
+    "developer blog",
+    "gemini",
+    "twitter",
+    "x"
   ],
   "icon": "images/icon.png",
   "activationEvents": [
@@ -121,8 +133,5 @@
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
     "shiki": "^1.29.2"
-  },
-  "optionalDependencies": {
-    "canvas": "^2.11.2"
   }
 }

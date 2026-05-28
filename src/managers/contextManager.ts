@@ -245,7 +245,7 @@ export class ContextManager implements vscode.Disposable {
     async setBaselineSummary(summary: string): Promise<void> {
         this.baselineSummary = summary;
         await this.workspaceState.update(BASELINE_SUMMARY_KEY, summary);
-        this.outputChannel.appendLine('[DevGhost] ✓ Baseline summary saved');
+        this.outputChannel.appendLine('[DevGhost] [OK] Baseline summary saved');
     }
 
     /**

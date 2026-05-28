@@ -189,7 +189,7 @@ export class AgenticBrain {
             'CONSTRAINTS:',
             '- Under 280 characters',
             "- Don't use exact counts like \"3 failures\"",
-            '- Keep it relatable: terminal pain → finally works',
+            '- Keep it relatable: terminal pain -> finally works',
             '- Include #BuildInPublic or #DevLife',
             '',
             'PROJECT BASELINE:',
@@ -276,101 +276,188 @@ export class AgenticBrain {
         ].join('\n');
     }
 
-    private buildCommitStoryPrompt(baseline: string, ctx: CommitStoryContext): string {
-        const fileList = (ctx.changedFiles ?? []).slice(0, 15).map(f => `- ${f}`).join('\n');
+    private stripCommitPrefix(text: string): string {
+        return (text || '')
+            .trim()
+            .replace(/^[a-z]+(?:\([^)]+\))?:\s*/i, '')
+            .trim();
+    }
 
+    private simplifyCommitLanguage(text: string): string {
+        const source = this.stripCommitPrefix(text);
+        if (!source) return source;
+
+        const replacements: Array<[RegExp, string | ((match: string) => string)]> = [
+            [/\bimplemented?\b/gi, 'built'],
+            [/\binitialize(?:d|s|ing)?\b/gi, 'set up'],
+            [/\benhance(?:d|s|ing)?\b/gi, 'improve'],
+            [/\bconfiguration\b/gi, 'setup'],
+            [/\bcomponents?\b/gi, (match: string) => (match.toLowerCase().endsWith('s') ? 'parts' : 'part')],
+        ];
+
+        let simplified = source;
+        for (const [pattern, replacement] of replacements) {
+            simplified = simplified.replace(pattern, (match) => typeof replacement === 'function' ? replacement(match) : replacement);
+        }
+
+        return simplified.replace(/\s{2,}/g, ' ').trim();
+    }
+
+    private summarizeFactPacketBefore(ctx: CommitStoryContext): string {
+        const commitBlob = this.simplifyCommitLanguage(ctx.commitMessage).toLowerCase();
+        const fileBlob = (ctx.changedFiles ?? []).join(' ').toLowerCase();
+        const combined = `${commitBlob} ${fileBlob}`;
+
+        if (/(layout|header|footer|home page|homepage|page|pages|public)/.test(combined)) {
+            return 'the public layout pieces were still missing or disconnected';
+        }
+
+        if (/(fix|fixed|bug|error|broken|repair|resolve)/.test(commitBlob)) {
+            return 'the old behavior was still broken';
+        }
+
+        if (/(refactor|rewrite|rework|reorganize)/.test(commitBlob)) {
+            return 'the old path was still awkward to follow';
+        }
+
+        if (/(setup|set up|start|start up|bootstrap|scaffold)/.test(commitBlob)) {
+            return 'the project was still missing this piece';
+        }
+
+        if (ctx.workType === 'feature') {
+            return 'the feature was still taking shape';
+        }
+
+        return 'not clear from available evidence';
+    }
+
+    private summarizeFactPacketNow(ctx: CommitStoryContext): string {
+        const commitBlob = this.simplifyCommitLanguage(ctx.commitMessage).toLowerCase();
+        const fileBlob = (ctx.changedFiles ?? []).join(' ').toLowerCase();
+        const combined = `${commitBlob} ${fileBlob}`;
+
+        if (/(layout|header|footer|home page|homepage|page|pages|public)/.test(combined)) {
+            return 'the basic public layout is in place now';
+        }
+
+        if (/(fix|fixed|bug|error|broken|repair|resolve)/.test(commitBlob)) {
+            return 'the issue is fixed now';
+        }
+
+        if (/(refactor|rewrite|rework|reorganize)/.test(commitBlob)) {
+            return 'the path is easier to follow now';
+        }
+
+        if (/(setup|set up|start|start up|bootstrap|scaffold)/.test(commitBlob)) {
+            return 'the base is ready for the next step';
+        }
+
+        if (ctx.workType === 'feature') {
+            return 'the feature is in place now';
+        }
+
+        return 'the change is in place now';
+    }
+
+    private summarizeFactPacketStillEarly(ctx: CommitStoryContext): string {
+        const commitBlob = this.simplifyCommitLanguage(ctx.commitMessage).toLowerCase();
+        const fileBlob = (ctx.changedFiles ?? []).join(' ').toLowerCase();
+        const combined = `${commitBlob} ${fileBlob}`;
+
+        if (/(layout|header|footer|home page|homepage|page|pages|public)/.test(combined)) {
+            return 'the rest of the public pages are still ahead';
+        }
+
+        if (ctx.workType === 'feature') {
+            return 'the broader flow may still be rough in spots';
+        }
+
+        return 'not clear from available evidence';
+    }
+
+    private summarizeFactPacketEvidence(ctx: CommitStoryContext): string {
+        const fileCount = ctx.changedFiles?.length ?? 0;
+        const diffSummary = ctx.compactDiffSummary?.trim() || '';
+        const compact = diffSummary.replace(/;\s*top files: .*$/i, '').trim();
+
+        if (compact) {
+            return compact;
+        }
+
+        if (fileCount > 0) {
+            return `+${ctx.additions} / -${ctx.deletions} across ${fileCount} files`;
+        }
+
+        return 'current commit and changed files';
+    }
+
+    private buildCommitFactPacket(ctx: CommitStoryContext): string[] {
         return [
-            'Write ONLY the draft text (max 280 chars). No explanations.',
+            `- Project: ${ctx.projectName || '(unknown)'}`,
+            `- Change: ${this.simplifyCommitLanguage(ctx.commitMessage) || 'not clear from available evidence'}`,
+            `- Before: ${this.summarizeFactPacketBefore(ctx)}`,
+            `- Now: ${this.summarizeFactPacketNow(ctx)}`,
+            `- Still early: ${this.summarizeFactPacketStillEarly(ctx)}`,
+            `- Useful evidence: ${this.summarizeFactPacketEvidence(ctx)}`,
+        ];
+    }
+
+    private buildCommitStoryPrompt(baseline: string, ctx: CommitStoryContext): string {
+        return [
+            'Write ONLY the final draft text (max 280 chars). No explanations.',
             'If not worth sharing, respond: NULL',
             '',
             'GROUNDING RULES:',
             '- Current project and current commit are the only source of truth.',
-            '- Use CURRENT PROJECT only for grounding. You do not have to mention the project name in the post unless it sounds natural.',
-            '- Write only about CURRENT PROJECT and CURRENT COMMIT. Never write about DevGhost unless CURRENT PROJECT is DevGhost.',
-            '- Background context is optional.',
-            '- Background context must never override CURRENT PROJECT or CURRENT COMMIT.',
-            '- If background context conflicts with current commit evidence, ignore the background context.',
-            '- If background context mentions a different project name, ignore that part.',
-            '- Current project and current commit are the source of truth.',
-            '- Never copy names, features, or product ideas from examples.',
-            '- Never write about the example project.',
-            '- Never mention DevGhost unless CURRENT PROJECT is DevGhost.',
-            '- Never mention Matterkeep unless CURRENT PROJECT is Matterkeep.',
-            '- If examples conflict with current commit evidence, ignore the examples.',
-            '- Current commit evidence overrides examples.',
+            '- Project is grounding only. The post does not need to mention it.',
+            '- Current commit and changed files are truth.',
+            '- Baseline is background only.',
+            '- If any context conflicts, trust the commit and changed files.',
             '- Current commit evidence overrides stale focus.',
             '- Focus is optional context, not truth.',
-            '- If focus conflicts with commit evidence, trust the commit.',
+            '- Never write about DevGhost unless CURRENT PROJECT is DevGhost.',
+            '- Never mention Matterkeep unless CURRENT PROJECT is Matterkeep.',
+            '- Never copy names, features, or product ideas from examples.',
+            '- Never write about the example project.',
+            '- If examples conflict with current commit evidence, ignore the examples.',
+            '- Current commit evidence overrides examples.',
             '',
-            'CURRENT PROJECT:',
-            ctx.projectName,
-            'CURRENT COMMIT:',
-            ctx.commitMessage,
+            'FACT PACKET:',
+            ...this.buildCommitFactPacket(ctx),
             '',
-            'BACKGROUND CONTEXT, USE ONLY IF CONSISTENT:',
+            'BACKGROUND ONLY:',
             baseline,
             '',
-            'WORK TYPE:',
-            ctx.workType,
-            '',
-            'CHANGED FILES:',
-            fileList || '(none)',
-            '',
-            `COMPACT DIFF: ${ctx.compactDiffSummary || '(not clear from available evidence)'}`,
-            `FILE CATEGORIES: ${ctx.fileCategories || '(not inferred)'}`,
-            '',
-            'WHY THIS MATTERS:',
-            ctx.whyItMatters || 'why not clear from available evidence',
-            '',
-            'USER-FACING RESULT:',
-            ctx.userFacingResult || 'why not clear from available evidence',
-            '',
-            'CURRENT FOCUS (optional):',
-            ctx.focus?.trim() || '(none)',
-            ctx.focusConflictNote ? `Focus status: ${ctx.focusConflictNote}` : 'Focus status: no conflict detected.',
-            '',
-            'STYLE RULES:',
-            '- Write like a developer sharing a clear progress update.',
-            '- Plain, specific, and natural. Not stiff. Not sloppy. Not hype.',
-            '- Prefer sentence-case.',
-            '- Avoid internal session-summary wording.',
-            '- Avoid "this session" unless the time block itself is the story.',
-            '- Avoid "wired up" unless it is the most accurate technical phrase.',
-            '- Prefer "built", "implemented", "connected", "fixed", "improved", or "made X work" when accurate.',
-            '- Match the clarity and plainness of the examples below, not their exact wording.',
-            '- One clear delta.',
-            '- Before/after contrast when possible.',
-            '- One-line payoff.',
-            '- Short, natural technical founder/developer tone.',
-            '- No forced hashtags.',
-            '- No corporate language.',
-            '- No generic filler.',
-            '- No copying commit messages.',
-            '- No file/function names unless they are the punchline.',
-            '- Do not list changed files.',
-            '- Translate internals into product or user behavior.',
-            '- Keep it 2 to 3 short sentences unless the evidence needs less.',
-            '- Avoid: spent a bit of time, some new, hoping this makes, feels good, big update, lots of changes, improved X today, it should now be better at, enhanced, optimized, core logic, commit-message-shaped prose.',
+            'WRITE THE FINAL DRAFT LIKE A SHORT NOTE FROM A DEVELOPER TALKING OVER COFFEE.',
+            'Rules:',
+            '- 2 short sentences, 3 only if needed.',
+            '- Simple English.',
+            '- No status-report tone.',
+            '- No changelog tone.',
+            '- No launch or announcement tone.',
+            '- No manager update tone.',
+            '- No corporate wording.',
+            '- No forced excitement.',
+            '- No hashtags for commit drafts.',
+            '- No file list unless one file or function is the punchline.',
+            '- Do not copy the commit message.',
+            '- Do not use report words like implemented, initialized, enhanced, optimized, foundation, groundwork, solid shell, or setup complete.',
+            '- Prefer: got X working, added X, fixed X, now X works, now X is in place, the page, flow, or app finally has X.',
+            '- Output only the final draft.',
             '',
             'NEUTRAL EXAMPLES:',
-            'These examples are style examples only. Never copy their project names, product names, features, or subject matter. Use only CURRENT PROJECT and CURRENT COMMIT as factual truth.',
-            '1. Built out the main dashboard flow.',
+            'These examples are style only. Never copy their project, feature, or subject matter.',
+            '1. Got the first public layout working.',
             '',
-            'The old screens were still disconnected, so it was hard to see how the admin path worked end to end.',
+            "Header, footer, and the home page structure are in place now, so the rest of the site won't feel like loose pieces.",
             '',
-            'Now the layout, navigation, and review pages have a real structure to build on.',
+            '2. Fixed a quiet watcher bug.',
             '',
-            '2. Fixed a quiet automation issue.',
+            'It was seeing the event, but not using it to decide whether a draft was worth showing. Now it checks the signal first.',
             '',
-            'The watcher was seeing the event, but it was not using it to decide whether the update was worth suggesting.',
+            '3. Got the request flow into better shape.',
             '',
-            'Now it checks the signal first, then asks for review before doing anything else.',
-            '',
-            '3. Tightened the request workflow.',
-            '',
-            'The old path collected the data, but it did not make the next state clear.',
-            '',
-            'Now each request has a cleaner path from submission to review.',
+            'The old path collected the data, but the next step was still fuzzy. Now each request has a clearer path from submit to review.',
             '',
             'FINAL OUTPUT INSTRUCTION:',
             'Write the draft now.',
