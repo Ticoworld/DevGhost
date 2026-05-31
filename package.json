@@ -1,6 +1,6 @@
 {
   "name": "devghost",
-  "displayName": "DevGhost",
+  "displayName": "DevGhost: Build-in-Public",
   "description": "A VS Code extension that watches real coding activity and suggests build-in-public drafts for review. Review-first. Never posts automatically.",
   "version": "3.3.11",
   "preview": true,
