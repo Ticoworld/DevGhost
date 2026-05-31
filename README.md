@@ -6,7 +6,9 @@ This is a beta build.
 
 ## Demo
 
-[![DevGhost demo: review-first draft flow](images/01-review-prompt.png)](https://youtu.be/K5C65atH3Xk)
+[![DevGhost demo: review-first draft flow](images/demo.gif)](https://youtu.be/K5C65atH3Xk)
+
+[Watch on YouTube](https://youtu.be/K5C65atH3Xk)
 
 ## What it does
 
