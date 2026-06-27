@@ -1,15 +1,45 @@
 # Changelog
 
-## 3.3.11 — Beta release candidate
+## 3.4.2 - Commit evidence quality fix
+
+- Commit-triggered Cloud posts now receive concrete commit evidence before generation.
+- The Cloud prompt now pushes for specific change-based posts instead of generic recap lines.
+- Generic commit outputs are retried once and then safely rejected if they are still too vague.
+- Focus remains helpful, but it is no longer the only source of truth for commit-triggered posts.
+- The focus prompt wording was clarified to better capture what changed.
+
+## 3.4.1 - Release candidate
+
+- Cloud is now the true default for automatic post suggestions.
+- Gemini/BYOK is no longer required for normal use.
+- Manual command is now `Write a Post Now`.
+- User-facing wording now uses post/review/Twitter/X language.
+- Visible command surface was cleaned up.
+- Privacy/data-use command was added.
+- Logs are calmer.
+
+## 3.4.0 - Cloud-first Marketplace release
+
+- DevGhost Cloud is now the default path for new users.
+- Users no longer need to bring a Gemini API key to start.
+- Cloud drafts use rich sanitized context and give you 3 free generations per rolling 24-hour window.
+- DevGhost Cloud stores metadata only in Neon.
+- Selected sanitized diff excerpts may be sent transiently when needed for draft quality.
+- BYOK commands remain hidden legacy or advanced commands.
+- Review-first UX and no-auto-posting remain unchanged.
+
+## Unreleased
+
+## 3.3.11 - Beta release candidate
 
 This is a beta build. Not a stable release. Review all drafts before sharing.
 
 ### Changes in 3.3.11
 
-- **ASCII-only log output**: All emoji and box-drawing characters removed from output channel logs. Fixes mojibake rendering on Windows hosts.
-- **Version bump and packaging hygiene**: Removed dead `canvas` optional dependency. Added `preview: true` flag, keywords, and accurate category tags.
-- **Commit story prompt — fact packet voice**: Draft prompts now use a structured fact packet and a plain developer voice rather than a verbose report-style structure.
-- **Improved commit voice examples**: Style examples updated to shorter, more natural phrasing.
+- ASCII-only log output: All emoji and box-drawing characters removed from output channel logs. Fixes mojibake rendering on Windows hosts.
+- Version bump and packaging hygiene: Removed dead `canvas` optional dependency. Added `preview: true` flag, keywords, and accurate category tags.
+- Commit story prompt - fact packet voice: Draft prompts now use a structured fact packet and a plain developer voice rather than a verbose report-style structure.
+- Improved commit voice examples: Style examples updated to shorter, more natural phrasing.
 
 ### What is stable in 3.3.11
 
@@ -17,15 +47,14 @@ This is a beta build. Not a stable release. Review all drafts before sharing.
 - Startup HEAD baseline guard: Existing commits at extension launch are recorded as baseline and never trigger automatic drafts.
 - Signal scoring gate: Local activity is scored before any AI call. Low-signal sessions are skipped.
 - API failure logging: Failures are logged cleanly with root cause in the output channel, not exposed in user popups.
-- AI key stored in VS Code SecretStorage: The key is never written to disk outside VS Code's own storage.
+- Cloud-first onboarding: DevGhost Cloud is the default setup flow, and legacy Gemini/BYOK is no longer part of the main onboarding path.
 
 ### Known limitations in 3.3.11
 
-- Requires you to bring your own Gemini API key.
-- DevGhost cannot guarantee sanitization of all sensitive content. Use on personal or non-client repos until comfortable.
-- No cloud sync.
-- No billing management.
-- No auto-post to X/Twitter or any platform.
+- Cloud drafts are limited to 3 free generations per rolling 24-hour window.
+- Sanitization reduces risk but does not guarantee all sensitive content is excluded.
+- Legacy Gemini/BYOK commands are hidden from the normal product surface.
+- No posting to X/Twitter or any platform.
 - Publisher and repository URL are placeholder values. The extension cannot be submitted to the VS Code Marketplace until a real publisher account is registered.
 
 ---

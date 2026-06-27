@@ -65,7 +65,6 @@ export class HistoryManager implements vscode.Disposable {
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
 
         if (!workspaceFolder) {
-            this.outputChannel.appendLine('[DevGhost] No workspace folder. History disabled.');
             return false;
         }
 
@@ -78,10 +77,9 @@ export class HistoryManager implements vscode.Disposable {
             this.logEvent('SESSION_START');
 
             this.initialized = true;
-            this.outputChannel.appendLine('[DevGhost] [OK] History manager initialized');
             return true;
         } catch (error) {
-            this.outputChannel.appendLine(`[DevGhost] History init error: ${error}`);
+            this.outputChannel.appendLine(`[error] History init failed: ${error}`);
             return false;
         }
     }
@@ -108,7 +106,7 @@ export class HistoryManager implements vscode.Disposable {
 
         this.events.push(event);
         this.setEventsArray(this.events).catch((error) => {
-            this.outputChannel.appendLine(`[DevGhost] Error persisting history: ${error}`);
+            this.outputChannel.appendLine(`[error] Failed to persist history: ${error}`);
         });
     }
 
@@ -148,9 +146,6 @@ export class HistoryManager implements vscode.Disposable {
         const timeSinceLastSession = Date.now() - lastEndTime;
 
         if (timeSinceLastSession > this.WARMUP_THRESHOLD_MS) {
-            const hours = Math.floor(timeSinceLastSession / (1000 * 60 * 60));
-            this.outputChannel.appendLine(`[DevGhost] Welcome back! Last session was ${hours} hours ago.`);
-
             if (this.onWarmupCallback) {
                 const summary = this.buildSessionSummary(lastEvents);
                 this.onWarmupCallback(summary, lastEvents);
@@ -218,7 +213,7 @@ export class HistoryManager implements vscode.Disposable {
     async resetHistory(): Promise<void> {
         this.events = [];
         await this.setEventsArray([]);
-        this.outputChannel.appendLine('[DevGhost] History reset');
+        this.outputChannel.appendLine('History reset.');
     }
 
     getHistoryForAI(limit: number = 10): string {

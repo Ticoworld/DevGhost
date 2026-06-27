@@ -2,9 +2,14 @@
 out/
 dist/
 *.vsix
+cloud/dist/
+cloud/build/
+cloud/.tsbuildinfo
+cloud/.vercel/
 
 # Dependencies
 node_modules/
+cloud/node_modules/
 
 # Testing
 .vscode-test/
@@ -14,6 +19,10 @@ coverage/
 # Environment
 .env
 .env.local
+cloud/.env
+cloud/.env.*
+cloud/.env*
+!cloud/.env.example
 
 # DevGhost runtime
 .devghost/

@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
 import { DevGhostConfig, DEFAULT_CONFIG } from '../models';
 
 /** workspaceState key for project baseline (config). Isolated per workspace. */
@@ -35,20 +36,11 @@ export class ContextManager implements vscode.Disposable {
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
 
         if (!workspaceFolder) {
-            this.outputChannel.appendLine('[DevGhost] No workspace is open. DevGhost is paused.');
             return;
         }
 
         await this.loadConfig();
         this.baselineSummary = this.workspaceState.get<string>(BASELINE_SUMMARY_KEY) ?? null;
-
-        if (this.config) {
-            this.outputChannel.appendLine(`[DevGhost] Project context loaded: "${this.config.projectName || 'Unnamed Project'}"`);
-            this.outputChannel.appendLine(`[DevGhost] Current focus: "${this.config.currentFocus || 'None set'}"`);
-        }
-        if (this.baselineSummary) {
-            this.outputChannel.appendLine('[DevGhost] Baseline summary loaded');
-        }
     }
 
     /**
@@ -59,7 +51,7 @@ export class ContextManager implements vscode.Disposable {
             const raw = this.workspaceState.get<DevGhostConfig>(WORKSPACE_STATE_KEY);
             this.config = raw ? { ...DEFAULT_CONFIG, ...raw } : null;
         } catch (error) {
-            this.outputChannel.appendLine(`[DevGhost] Error loading config: ${error}`);
+            this.outputChannel.appendLine(`[error] Error loading config: ${error}`);
             this.config = null;
         }
     }
@@ -72,9 +64,8 @@ export class ContextManager implements vscode.Disposable {
 
         try {
             await this.workspaceState.update(WORKSPACE_STATE_KEY, this.config);
-            this.outputChannel.appendLine('[DevGhost] Config saved');
         } catch (error) {
-            this.outputChannel.appendLine(`[DevGhost] Error saving config: ${error}`);
+            this.outputChannel.appendLine(`[error] Error saving config: ${error}`);
         }
     }
 
@@ -83,26 +74,30 @@ export class ContextManager implements vscode.Disposable {
      */
     async createConfig(): Promise<boolean> {
         const projectName = await vscode.window.showInputBox({
-            prompt: 'What are you building?',
+            prompt: 'Project name',
             placeHolder: 'e.g., billing dashboard, docs site, API service',
+            value: this.config?.projectName || undefined,
         });
 
         if (!projectName) return false;
 
         const mission = await vscode.window.showInputBox({
-            prompt: 'What\'s the goal? (One sentence)',
+            prompt: 'What is the goal for this workspace? (One sentence)',
             placeHolder: 'e.g., ship a cleaner checkout flow',
+            value: this.config?.mission || undefined,
         });
 
         if (!mission) return false;
 
         const currentFocus = await vscode.window.showInputBox({
-            prompt: 'What are you working on right now? (Optional)',
+            prompt: 'What are you focused on right now? (Optional)',
             placeHolder: 'e.g., fixing login, cleaning dashboard, preparing demo',
+            value: this.config?.currentFocus || undefined,
         }) || '';
 
+        const existing = this.config ?? DEFAULT_CONFIG;
         this.config = {
-            ...DEFAULT_CONFIG,
+            ...existing,
             projectName,
             mission,
             currentFocus,
@@ -111,16 +106,8 @@ export class ContextManager implements vscode.Disposable {
 
         await this.saveConfig();
 
-        this.outputChannel.appendLine('');
-        this.outputChannel.appendLine('[DevGhost] Set up complete');
-        this.outputChannel.appendLine(`   Project: ${projectName}`);
-        this.outputChannel.appendLine(`   Goal: ${mission}`);
-        if (currentFocus) {
-            this.outputChannel.appendLine(`   Current Focus: ${currentFocus}`);
-        }
-        this.outputChannel.appendLine('');
-
-        vscode.window.showInformationMessage('Project setup complete. DevGhost is watching this workspace.');
+        this.outputChannel.appendLine('Project details saved.');
+        this.outputChannel.appendLine('Post suggestions ready.');
 
         return true;
     }
@@ -151,21 +138,12 @@ export class ContextManager implements vscode.Disposable {
             const commits = gitLog.trim().split('\n').filter((line: string) => line.length > 0);
 
             if (commits.length > 0) {
-                this.outputChannel.appendLine(`[DevGhost] Caught up on ${commits.length} recent commits:`);
-                commits.forEach((commit: string) => {
-                    this.outputChannel.appendLine(`  - ${commit}`);
-                });
-
                 const lastCommit = commits[0].replace(/^[a-f0-9]+\s+/, '');
                 this.config.currentFocus = `Continuing from: ${lastCommit}`;
                 await this.saveConfig();
-
-                vscode.window.showInformationMessage(
-                    `DevGhost: Caught up on ${commits.length} recent commits. Ready to draft updates.`
-                );
             }
         } catch (error) {
-            this.outputChannel.appendLine(`[DevGhost] Could not read git history: ${error}`);
+            this.outputChannel.appendLine(`[error] Could not read git history: ${error}`);
         }
     }
 
@@ -173,18 +151,23 @@ export class ContextManager implements vscode.Disposable {
      * Update the current focus.
      */
     async setFocus(): Promise<void> {
-        if (!this.config) {
-            vscode.window.showWarningMessage('DevGhost: Set up the project first.');
-            return;
-        }
-
         const focus = await vscode.window.showInputBox({
-            prompt: 'What are you working on now?',
-            placeHolder: 'e.g., fixing login, cleaning dashboard, preparing demo',
-            value: this.config.currentFocus,
+            prompt: 'What changed or what are you focused on?',
+            placeHolder: 'e.g., tightening the CLI checks and eval flow',
+            value: this.config?.currentFocus,
         });
 
         if (focus !== undefined) {
+            if (!this.config) {
+                this.config = {
+                    ...DEFAULT_CONFIG,
+                    projectName: this.getWorkspaceName(),
+                    mission: '',
+                    currentFocus: '',
+                    struggleStartTime: null,
+                };
+            }
+
             if (focus !== this.config.currentFocus) {
                 this.config.struggleStartTime = focus ? new Date().toISOString() : null;
             }
@@ -193,10 +176,9 @@ export class ContextManager implements vscode.Disposable {
             await this.saveConfig();
 
             if (focus) {
-                this.outputChannel.appendLine(`[DevGhost] Focus set: "${focus}"`);
-                vscode.window.showInformationMessage('DevGhost: Current focus saved.');
+                this.outputChannel.appendLine('Focus saved.');
             } else {
-                this.outputChannel.appendLine('[DevGhost] Focus cleared');
+                this.outputChannel.appendLine('Focus cleared.');
             }
         }
     }
@@ -245,7 +227,6 @@ export class ContextManager implements vscode.Disposable {
     async setBaselineSummary(summary: string): Promise<void> {
         this.baselineSummary = summary;
         await this.workspaceState.update(BASELINE_SUMMARY_KEY, summary);
-        this.outputChannel.appendLine('[DevGhost] [OK] Baseline summary saved');
     }
 
     /**
@@ -258,7 +239,7 @@ export class ContextManager implements vscode.Disposable {
         await this.workspaceState.update(WORKSPACE_STATE_KEY, null as any);
         await this.workspaceState.update(BASELINE_SUMMARY_KEY, null as any);
 
-        this.outputChannel.appendLine('[DevGhost] Project context reset');
+        this.outputChannel.appendLine('Project context reset.');
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -281,8 +262,8 @@ export class ContextManager implements vscode.Disposable {
         }
 
         const focus = await vscode.window.showInputBox({
-            prompt: `What are you working on today in "${this.config.projectName}"?`,
-            placeHolder: 'e.g., fixing login, cleaning dashboard, preparing demo',
+            prompt: `What changed or what are you focused on in "${this.config.projectName}"?`,
+            placeHolder: 'e.g., tightening the CLI checks and eval flow',
             ignoreFocusOut: false,
         });
 
@@ -292,7 +273,7 @@ export class ContextManager implements vscode.Disposable {
             this.config.lastFocusAsked = new Date().toISOString();
             await this.logEvent('focus_set', focus);
             await this.saveConfig();
-            this.outputChannel.appendLine(`[DevGhost] Focus set: "${focus}"`);
+            this.outputChannel.appendLine('Focus saved.');
             return focus;
         } else {
             this.config.lastFocusAsked = new Date().toISOString();
@@ -315,6 +296,7 @@ export class ContextManager implements vscode.Disposable {
 
     async inferFocusFromCommit(commitMessage: string): Promise<{ shouldAsk: boolean; inferredFocus: string }> {
         if (!this.config) return { shouldAsk: false, inferredFocus: '' };
+        if (!this.config.currentFocus?.trim()) return { shouldAsk: false, inferredFocus: '' };
 
         const messageLower = commitMessage.toLowerCase();
 
@@ -361,7 +343,7 @@ export class ContextManager implements vscode.Disposable {
             this.config.currentFocus = inferredFocus;
             this.config.struggleStartTime = new Date().toISOString();
             await this.saveConfig();
-            this.outputChannel.appendLine(`[DevGhost] Focus shifted: "${oldFocus}" -> "${inferredFocus}"`);
+            this.outputChannel.appendLine('Focus shifted.');
         }
     }
 
@@ -416,5 +398,10 @@ export class ContextManager implements vscode.Disposable {
 
     dispose(): void {
         this.disposables.forEach((d) => d.dispose());
+    }
+
+    private getWorkspaceName(): string {
+        const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        return workspaceFolder ? path.basename(workspaceFolder) : 'workspace';
     }
 }

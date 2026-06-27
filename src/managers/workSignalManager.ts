@@ -382,14 +382,6 @@ export class WorkSignalManager {
         const blockers: string[] = [];
         let score = 0;
 
-        if (!input.canPostToday) {
-            blockers.push('daily draft limit reached');
-        }
-
-        if (!input.hasBaselineSummary) {
-            blockers.push('project context is not ready');
-        }
-
         if (!input.currentFocus.trim() && input.sessionMinutes < 20 && snapshot.commitCount === 0 && snapshot.recoveryCount === 0) {
             blockers.push('not enough focus or session context yet');
         }
@@ -568,6 +560,18 @@ export class WorkSignalManager {
         return recent
             .map((event) => `[${new Date(event.timestamp).toLocaleTimeString()}] ${event.kind}`)
             .join('\n');
+    }
+
+    /**
+     * Get the most recent successful command names for cloud context.
+     * Returns command strings only, sorted by the last observed success.
+     */
+    getRecentSuccessfulCommandNames(limit: number = 5): string[] {
+        return [...this.commandStats.entries()]
+            .filter(([, stats]) => stats.successes > 0 && stats.lastSuccessAt !== null)
+            .sort((a, b) => (b[1].lastSuccessAt ?? 0) - (a[1].lastSuccessAt ?? 0))
+            .map(([command]) => command)
+            .slice(0, Math.max(1, limit));
     }
 
     private countFreshRecoverySignals(now: number): number {

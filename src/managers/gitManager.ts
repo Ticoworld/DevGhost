@@ -75,7 +75,7 @@ export class GitManager implements vscode.Disposable {
             const gitExtension = vscode.extensions.getExtension('vscode.git');
 
             if (!gitExtension) {
-                this.outputChannel.appendLine('[DevGhost] Git extension not found');
+                this.outputChannel.appendLine('Git integration unavailable.');
                 return false;
             }
 
@@ -87,7 +87,7 @@ export class GitManager implements vscode.Disposable {
             this.gitApi = gitExtension.exports.getAPI(1);
 
             if (!this.gitApi) {
-                this.outputChannel.appendLine('[DevGhost] Could not get Git API');
+                this.outputChannel.appendLine('Git integration unavailable.');
                 return false;
             }
 
@@ -95,7 +95,7 @@ export class GitManager implements vscode.Disposable {
             if (this.gitApi.repositories.length > 0) {
                 this.repository = this.gitApi.repositories[0];
                 await this.setupRepositoryWatcher();
-                this.outputChannel.appendLine('[DevGhost] [OK] Git integration enabled');
+                this.outputChannel.appendLine('Git ready.');
                 return true;
             }
 
@@ -104,15 +104,15 @@ export class GitManager implements vscode.Disposable {
                 if (!this.repository) {
                     this.repository = repo;
                     void this.setupRepositoryWatcher();
-                    this.outputChannel.appendLine('[DevGhost] [OK] Git repository detected');
+                    this.outputChannel.appendLine('Git ready.');
                 }
             });
 
-            this.outputChannel.appendLine('[DevGhost] Waiting for Git repository...');
+            this.outputChannel.appendLine('Waiting for Git repository.');
             return true;
 
         } catch (error) {
-            this.outputChannel.appendLine(`[DevGhost] Git initialization error: ${error}`);
+            this.outputChannel.appendLine(`[error] Git initialization failed: ${error}`);
             return false;
         }
     }
@@ -180,14 +180,13 @@ export class GitManager implements vscode.Disposable {
         }
 
         await this.recordCommitAsSeen(currentHead, 'fresh_commit');
-        this.outputChannel.appendLine(`[DevGhost] New commit detected: ${currentHead.substring(0, 7)}`);
         this.processCommitAnalysis(analysis);
     }
 
     private async recordCommitAsSeen(
         commitHash: string,
         classification: CommitClassification,
-        logMessage?: string
+        _logMessage?: string
     ): Promise<void> {
         this.lastHeadCommit = commitHash;
         this.lastSeenCommitHash = commitHash;
@@ -195,10 +194,10 @@ export class GitManager implements vscode.Disposable {
 
         await this.persistLastSeenCommitHash(commitHash);
 
-        if (classification === 'startup_baseline' && logMessage) {
-            this.outputChannel.appendLine(`[DevGhost] ${logMessage}: ${commitHash.substring(0, 7)}`);
-        } else if (classification === 'historical_existing_commit' && logMessage) {
-            this.outputChannel.appendLine(`[DevGhost] ${logMessage}`);
+        if (classification === 'startup_baseline' && _logMessage) {
+            // Baseline commits stay quiet in the normal log.
+        } else if (classification === 'historical_existing_commit' && _logMessage) {
+            // Historical commits stay quiet in the normal log.
         }
     }
 
@@ -210,7 +209,7 @@ export class GitManager implements vscode.Disposable {
         try {
             await this.workspaceState.update(this.lastSeenCommitKey, commitHash);
         } catch (error) {
-            this.outputChannel.appendLine(`[DevGhost] Error persisting last seen commit: ${error}`);
+            this.outputChannel.appendLine(`[error] Failed to persist last seen commit: ${error}`);
         }
     }
 
@@ -324,7 +323,7 @@ export class GitManager implements vscode.Disposable {
             };
 
         } catch (error) {
-            this.outputChannel.appendLine(`[DevGhost] Error analyzing commit: ${error}`);
+            this.outputChannel.appendLine(`[error] Could not analyze commit: ${error}`);
             return null;
         }
     }
@@ -333,22 +332,8 @@ export class GitManager implements vscode.Disposable {
      * Process the commit analysis and trigger appropriate callbacks.
      */
     private processCommitAnalysis(analysis: CommitAnalysis): void {
-        this.outputChannel.appendLine('');
-        this.outputChannel.appendLine('## [COMMIT DETECTED]');
-        this.outputChannel.appendLine('Hash: ' + analysis.hash);
-        this.outputChannel.appendLine('Message: ' + analysis.message);
-        this.outputChannel.appendLine('Changes: +' + analysis.additions + ' / -' + analysis.deletions + ' (' + analysis.filesChanged + ' files)');
-        this.outputChannel.appendLine('--------------------------');
-
         // Check for PIVOT
         if (analysis.isPivot) {
-            this.outputChannel.appendLine('');
-            this.outputChannel.appendLine('## [PIVOT DETECTED]');
-            this.outputChannel.appendLine('Heavy refactor: -' + analysis.deletions + ' lines');
-            this.outputChannel.appendLine('What is the new vision?');
-            this.outputChannel.appendLine('--------------------------');
-            this.outputChannel.appendLine('');
-
             if (this.onPivotCallback) {
                 this.onPivotCallback(analysis);
             }
@@ -358,12 +343,7 @@ export class GitManager implements vscode.Disposable {
         // (only prompts if Brain says the commit is significant, not just time-based)
         // We still log it here for visibility, but the popup decision happens after Brain runs
         if (analysis.isDeepWork) {
-            this.outputChannel.appendLine('');
-            this.outputChannel.appendLine('## [DEEP WORK SESSION]');
-            this.outputChannel.appendLine(analysis.sessionMinutes + ' minutes of focused work');
-            this.outputChannel.appendLine('Commit recorded. DevGhost will evaluate whether it is worth a draft.');
-            this.outputChannel.appendLine('--------------------------------------------------------------------');
-            this.outputChannel.appendLine('');
+            // Deep work is handled by the draft scorer and Cloud flow.
         }
 
         // Always trigger general commit callback
@@ -371,7 +351,6 @@ export class GitManager implements vscode.Disposable {
             this.onCommitCallback(analysis);
         }
 
-        this.outputChannel.appendLine('');
     }
 
     /**

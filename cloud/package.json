@@ -1,0 +1,17 @@
+{
+  "name": "devghost-cloud",
+  "private": true,
+  "version": "0.1.0",
+  "description": "DevGhost Cloud backend for review-first draft generation.",
+  "type": "commonjs",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@neondatabase/serverless": "^1.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "18.x",
+    "typescript": "^5.3.3"
+  }
+}

@@ -1,8 +1,8 @@
 {
   "name": "devghost",
   "displayName": "DevGhost: Build-in-Public",
-  "description": "A VS Code extension that watches real coding activity and suggests build-in-public drafts for review. Review-first. Never posts automatically.",
-  "version": "3.3.11",
+  "description": "Cloud-first VS Code extension that watches real coding activity and suggests build-in-public drafts for review. Review-first. Never posts automatically.",
+  "version": "3.4.2",
   "preview": true,
   "publisher": "ticoworld",
   "repository": {
@@ -26,6 +26,9 @@
     "AI drafting",
     "commit logger",
     "developer blog",
+    "cloud",
+    "cloud-first",
+    "review-first",
     "gemini",
     "twitter",
     "x"
@@ -39,63 +42,55 @@
     "configuration": {
       "title": "DevGhost",
       "properties": {
-        "devghost.model": {
-          "type": "string",
-          "default": "auto",
-          "description": "The AI model to use for drafting. Leave as 'auto' to let DevGhost choose a compatible model for your key.",
-          "enum": [
-            "auto",
-            "gemini-2.5-flash",
-            "gemini-2.0-flash",
-            "gemini-1.5-flash"
-          ],
-          "enumDescriptions": [
-            "Recommended - Automatically selects the best compatible model for your key",
-            "Latest model",
-            "Stable model",
-            "Lower-cost model"
-          ]
-        },
         "devghost.deepWorkMinutes": {
           "type": "number",
           "default": 90,
           "minimum": 15,
           "description": "Minutes of active coding before DevGhost considers a session deep work."
+        },
+        "devghost.cloudApiBaseUrl": {
+          "type": "string",
+          "default": "https://cloud-ten-steel.vercel.app",
+          "description": "Cloud backend URL used by DevGhost Cloud."
         }
       }
     },
     "commands": [
       {
         "command": "devghost.initialize",
-        "title": "DevGhost: Set Up Project"
+        "title": "DevGhost: Edit Project Details"
       },
       {
         "command": "devghost.setFocus",
-        "title": "DevGhost: Set Current Focus"
+        "title": "DevGhost: Set Focus"
       },
       {
         "command": "devghost.iWon",
-        "title": "DevGhost: Draft a Win"
+        "title": "DevGhost: Draft a Win (Legacy)"
       },
       {
         "command": "devghost.showLogs",
-        "title": "DevGhost: Show Logs"
+        "title": "DevGhost: View Logs"
+      },
+      {
+        "command": "devghost.privacy",
+        "title": "DevGhost: Privacy & Data Use"
       },
       {
         "command": "devghost.setApiKey",
-        "title": "DevGhost: Add AI Key"
+        "title": "DevGhost: Add AI Key (Legacy)"
       },
       {
         "command": "devghost.clearApiKey",
-        "title": "DevGhost: Clear AI Key"
+        "title": "DevGhost: Clear AI Key (Legacy)"
       },
       {
         "command": "devghost.pause",
-        "title": "DevGhost: Pause"
+        "title": "DevGhost: Pause Suggestions"
       },
       {
         "command": "devghost.resume",
-        "title": "DevGhost: Resume"
+        "title": "DevGhost: Resume Suggestions"
       },
       {
         "command": "devghost.resetProjectContext",
@@ -107,13 +102,49 @@
       },
       {
         "command": "devghost.shareGrind",
-        "title": "DevGhost: Draft From Recent Work"
+        "title": "DevGhost: Draft From Recent Work (Legacy)"
+      },
+      {
+        "command": "devghost.cloudDraft",
+        "title": "DevGhost: Write a Post Now"
       },
       {
         "command": "devghost.checkAiConnection",
-        "title": "DevGhost: Check AI Setup"
+        "title": "DevGhost: Check AI Setup (Legacy)"
       }
-    ]
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "devghost.setApiKey",
+          "when": "false"
+        },
+        {
+          "command": "devghost.clearApiKey",
+          "when": "false"
+        },
+        {
+          "command": "devghost.checkAiConnection",
+          "when": "false"
+        },
+        {
+          "command": "devghost.iWon",
+          "when": "false"
+        },
+        {
+          "command": "devghost.shareGrind",
+          "when": "false"
+        },
+        {
+          "command": "devghost.resetProjectContext",
+          "when": "false"
+        },
+        {
+          "command": "devghost.resetRecentActivity",
+          "when": "false"
+        }
+      ]
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
@@ -129,6 +160,7 @@
   "devDependencies": {
     "@types/node": "18.x",
     "@types/vscode": "^1.85.0",
+    "@vscode/test-electron": "^3.0.0",
     "@typescript-eslint/eslint-plugin": "^6.15.0",
     "@typescript-eslint/parser": "^6.15.0",
     "eslint": "^8.56.0",

@@ -1,9 +1,17 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import { randomUUID } from 'crypto';
 import { ContextManager, SessionManager, GitManager, HistoryManager, WorkSignalManager, CommitAnalysis, AutomaticDraftDecision } from './managers';
 import { KeyManager, GeminiService } from './analyzer';
 import { scanProjectEnvironment } from './analyzer/projectScanner';
+import { CloudClient } from './cloud/cloudClient';
+import { buildCloudDraftRequest, buildCommitEvidence, type CloudDraftBuildResult } from './cloud/contextBuilder';
+import { formatCloudErrorMessage } from './cloud/errors';
+import { getOrCreateCloudDeviceId } from './cloud/deviceId';
+import { CloudQuotaState } from './cloud/quotaState';
+import { CloudRepetitionMemory, type RepetitionSnapshot } from './cloud/repetitionMemory';
+import type { CommitEvidence, DismissReason, FeedbackType, TriggerType } from './cloud/contracts';
 
 /**
  * DevGhost 2.0 - Session-Based "Build in Public" Automation
@@ -32,7 +40,10 @@ let historyManager: HistoryManager | undefined;
 let workSignalManager: WorkSignalManager | undefined;
 let keyManager: KeyManager | undefined;
 let geminiService: GeminiService | undefined;
+let cloudQuotaState: CloudQuotaState | undefined;
+let cloudRepetitionMemory: CloudRepetitionMemory | undefined;
 let workspaceState: vscode.Memento | undefined;
+let extensionContextRef: vscode.ExtensionContext | undefined;
 let lastAutomaticDraftDecision: { eventKey: string; decision: AutomaticDraftDecision } | null = null;
 
 // Phase 8: Agentic Intelligence
@@ -45,6 +56,8 @@ let agenticBrain: AgenticBrain | undefined;
 let geminiReadyPromise: Promise<void> = Promise.resolve();
 
 // Phase 6A: (legacy) snooze tracking removed in Phase 3
+
+let focusPromptHandledThisSession = false;
 
 const CONTROL_STATE_KEY = 'devghost.controlState';
 const AUTO_DRAFT_STATE_KEY = 'devghost.autoDraftState';
@@ -122,6 +135,49 @@ async function snoozeAutoDraftPrompts(): Promise<void> {
     }));
 }
 
+function logStatus(message: string): void {
+    outputChannel?.appendLine(message);
+}
+
+function logDebug(message: string): void {
+    if (vscode.env.logLevel === vscode.LogLevel.Debug || vscode.env.logLevel === vscode.LogLevel.Trace) {
+        outputChannel?.appendLine(`[debug] ${message}`);
+    }
+}
+
+function logError(message: string): void {
+    outputChannel?.appendLine(`[error] ${message}`);
+}
+
+function buildCloudBaselineSummary(scan: string): string {
+    return scan
+        .split(/\r?\n/)
+        .filter((line) => !/^Root:\s*/i.test(line))
+        .join('\n')
+        .trim();
+}
+
+async function seedCloudBaselineSummary(workspaceRoot: string): Promise<void> {
+    if (!contextManager || !workspaceRoot) {
+        return;
+    }
+
+    try {
+        if (contextManager.hasBaselineSummary()) {
+            return;
+        }
+
+        const scan = await scanProjectEnvironment(workspaceRoot);
+        const baseline = buildCloudBaselineSummary(scan);
+        if (baseline.length > 0) {
+            await contextManager.setBaselineSummary(baseline);
+            logDebug('Cloud project scan saved.');
+        }
+    } catch {
+        logDebug('Cloud project scan could not be saved.');
+    }
+}
+
 function getAutoDraftSuppressionReason(eventKey: string): 'snoozed' | 'handled' | null {
     const state = getAutoDraftState();
     if (Date.now() < state.snoozedUntil) {
@@ -140,9 +196,7 @@ function logSanitization(event: {
     shortenedPaths: number;
     truncated: boolean;
 }): void {
-    outputChannel?.appendLine(
-        `[DevGhost] Sanitized ${event.label} before Gemini (${event.redactedSensitiveLines} sensitive lines, ${event.removedSensitiveFiles} sensitive files, ${event.shortenedPaths} shortened paths${event.truncated ? ', truncated' : ''}).`
-    );
+    logDebug(`Sanitized ${event.label} for Cloud (${event.redactedSensitiveLines} sensitive lines, ${event.removedSensitiveFiles} sensitive files, ${event.shortenedPaths} shortened paths${event.truncated ? ', truncated' : ''}).`);
 }
 
 function canDraftPostOrWarn(isManual?: boolean): boolean {
@@ -150,7 +204,7 @@ function canDraftPostOrWarn(isManual?: boolean): boolean {
     if (!historyManager) return true;
     const ok = historyManager.canPostToday();
     if (!ok) {
-        outputChannel?.appendLine('[DevGhost] [WARN] Daily draft limit reached (3 drafts / 24h). Aborting AI draft.');
+        outputChannel?.appendLine('[warn] Daily post limit reached. Aborting legacy post.');
     }
     return ok;
 }
@@ -527,6 +581,20 @@ async function getTop3DiffsForDeepWork(workspaceRoot: string): Promise<string[]>
     return result;
 }
 
+// Keep the legacy helper set reachable so strict unused checks do not fail while the Cloud path carries the product flow.
+const PHASE_1_LEGACY_HELPERS = [
+    consumeAutomaticDraftDecision,
+    buildCompactCommitSummary,
+    joinNaturalList,
+    isDevGhostProjectName,
+    normalizeComparableText,
+    buildFocusConflictNote,
+    inferWhyItMatters,
+    inferUserFacingResult,
+    getTop3DiffsForDeepWork,
+];
+void PHASE_1_LEGACY_HELPERS;
+
 type DraftFlowOptions = {
     label: string;
     createDraft: () => Promise<DraftFlowOutcome>;
@@ -546,6 +614,29 @@ type DraftFlowFailure = {
 };
 
 type DraftFlowOutcome = string | DraftFlowFailure | null;
+
+type DraftReviewFeedback = {
+    feedbackType: FeedbackType;
+    dismissReason?: DismissReason;
+};
+
+type DraftReviewOptions = {
+    onOpen?: () => Promise<void> | void;
+    onFeedback?: (feedback: DraftReviewFeedback) => Promise<void> | void;
+};
+
+type PostReadyPromptResult = 'review' | 'not_now' | 'pause';
+
+type CloudDraftFlowOptions = {
+    automatic?: boolean;
+    triggerType: TriggerType;
+    eventKey?: string;
+    label: string;
+    hints?: AutomaticDraftGateOptions['hints'];
+    triggerEvidence?: CommitEvidence;
+    onOpen?: () => Promise<void> | void;
+    onFeedback?: (feedback: DraftReviewFeedback) => Promise<void> | void;
+};
 
 function isDraftFlowFailure(value: DraftFlowOutcome): value is DraftFlowFailure {
     return !!value && typeof value === 'object' && 'ok' in value && value.ok === false;
@@ -630,24 +721,18 @@ function isFreshCommitForSession(commitAnalysis: CommitAnalysis): boolean {
 
 async function allowAutomaticDraft(options: AutomaticDraftGateOptions): Promise<boolean> {
     if (isDevGhostPaused()) {
-        outputChannel?.appendLine(`[DevGhost] Auto draft skipped (${options.label}): DevGhost is paused.`);
+        logDebug(`Auto draft skipped (${options.label}): DevGhost is paused.`);
         return false;
     }
 
     if (options.trigger === 'COMMIT_DETECTED' && options.hints?.commitAnalysis && !isFreshCommitForSession(options.hints.commitAnalysis)) {
-        outputChannel?.appendLine(`[DevGhost] Auto draft skipped (${options.label}): Existing commit skipped: ${options.hints.commitAnalysis.hash} predates this DevGhost session.`);
+        logDebug(`Auto draft skipped (${options.label}): Existing commit ${options.hints.commitAnalysis.hash} predates this DevGhost session.`);
         return false;
     }
 
     const tracker = workSignalManager;
-    const apiKey = await keyManager?.getApiKey();
-    if (!apiKey) {
-        outputChannel?.appendLine(`[DevGhost] Auto draft skipped (${options.label}): AI key is not ready.`);
-        return false;
-    }
-
     if (!tracker) {
-        outputChannel?.appendLine(`[DevGhost] Auto draft skipped (${options.label}): local signal tracker is unavailable.`);
+        logDebug(`Auto draft skipped (${options.label}): local signal tracker is unavailable.`);
         return false;
     }
 
@@ -656,8 +741,6 @@ async function allowAutomaticDraft(options: AutomaticDraftGateOptions): Promise<
     const currentFocus = config?.currentFocus || '';
     const focusAgeMinutes = contextManager?.getStruggleDurationMinutes() || 0;
     const sessionMinutes = sessionManager?.getSessionDurationMinutes() || 0;
-    const hasBaselineSummary = contextManager?.hasBaselineSummary() ?? false;
-    const canPostToday = historyManager?.canPostToday() ?? true;
     const decision = tracker.evaluateAutomaticDraft({
         trigger: options.trigger,
         eventKey: options.eventKey,
@@ -666,18 +749,18 @@ async function allowAutomaticDraft(options: AutomaticDraftGateOptions): Promise<
         currentFocus,
         focusAgeMinutes,
         sessionMinutes,
-        hasBaselineSummary,
-        canPostToday,
+        hasBaselineSummary: contextManager?.hasBaselineSummary() ?? false,
+        canPostToday: true,
         hints: options.hints,
     });
     rememberAutomaticDraftDecision(options.eventKey, decision);
 
     if (!decision.allowed) {
-        outputChannel?.appendLine(`[DevGhost] Auto draft skipped (${options.label}): score ${decision.score}/${decision.threshold} | ${decision.blockers.join('; ')}`);
+        logDebug(`Auto draft skipped (${options.label}): ${decision.score}/${decision.threshold} | ${decision.blockers.join('; ')}`);
         return false;
     }
 
-    outputChannel?.appendLine(`[DevGhost] Auto draft score ${decision.score}/${decision.threshold} (${options.label}): ${decision.reasons.join('; ')}`);
+    logDebug(`Auto draft score ${decision.score}/${decision.threshold} (${options.label}): ${decision.reasons.join('; ')}`);
     return true;
 }
 
@@ -688,35 +771,78 @@ async function openXDraft(draft: string): Promise<boolean> {
     try {
         return await vscode.env.openExternal(vscode.Uri.parse(draftUrl));
     } catch (error) {
-        outputChannel?.appendLine(`[DevGhost] Failed to open X draft: ${error}`);
+        logDebug(`Failed to open Twitter/X post: ${error}`);
         return false;
     }
 }
 
-async function showDraftReview(draft: string, options?: { onOpen?: () => Promise<void> | void }): Promise<void> {
+async function showPostReadyPrompt(automatic: boolean): Promise<PostReadyPromptResult> {
+    const selection = await vscode.window.showInformationMessage(
+        automatic ? 'Post ready to review from your recent work.' : 'Post ready to review.',
+        ...(automatic
+            ? ['Review post', 'Not now', 'Pause suggestions']
+            : ['Review post'])
+    );
+
+    if (selection === 'Review post') {
+        return 'review';
+    }
+
+    if (selection === 'Pause suggestions') {
+        return 'pause';
+    }
+
+    return 'not_now';
+}
+
+async function showDraftReview(draft: string, options?: DraftReviewOptions): Promise<void> {
+    logStatus('Post ready for review.');
     const selection = await vscode.window.showInformationMessage(
         draft,
-        'Copy draft',
-        'Open X draft',
+        'Copy post',
+        'Open in Twitter/X',
         'Dismiss'
     );
 
-    if (selection === 'Copy draft') {
+    if (selection === 'Copy post') {
         await vscode.env.clipboard.writeText(draft);
-        await vscode.window.showInformationMessage('Draft copied to clipboard.');
+        logStatus('Post copied.');
+        void Promise.resolve(vscode.window.showInformationMessage('Post copied.')).catch(() => undefined);
+        await options?.onFeedback?.({
+            feedbackType: 'copied',
+        });
         return;
     }
 
-    if (selection === 'Open X draft') {
+    if (selection === 'Open in Twitter/X') {
         const opened = await openXDraft(draft);
-        if (!opened) {
-            vscode.window.showErrorMessage('DevGhost could not open the X draft.');
+        if (opened !== true) {
+            vscode.window.showErrorMessage('DevGhost could not open Twitter/X.');
             return;
         }
 
-        historyManager?.logEvent('POST_DRAFTED', { message: draft });
+        historyManager?.logEvent('POST_DRAFTED');
+        logStatus('Opened in Twitter/X.');
+        void Promise.resolve(vscode.window.showInformationMessage('Opened in Twitter/X. DevGhost never posts automatically.')).catch(() => undefined);
         await options?.onOpen?.();
+        await options?.onFeedback?.({
+            feedbackType: 'opened_x',
+        });
+        return;
     }
+
+    if (selection === 'Dismiss') {
+        await options?.onFeedback?.({
+            feedbackType: 'dismissed',
+            dismissReason: 'other',
+        });
+    }
+}
+
+async function showPrivacyAndDataUse(): Promise<void> {
+    const copy = 'DevGhost creates posts using a cleaned summary of recent work. It may send selected sanitized context to DevGhost Cloud when generating a post. Raw code, raw diffs, prompts, provider responses, post text, terminal output, file contents, and absolute paths are not stored. Every post opens for review first. DevGhost never posts automatically.';
+
+    await vscode.window.showInformationMessage(copy, { modal: true }, 'Close');
 }
 
 async function ensureGeminiReady(options: { explicit: boolean; reason: string; forceRefresh?: boolean }): Promise<boolean> {
@@ -729,7 +855,7 @@ async function ensureGeminiReady(options: { explicit: boolean; reason: string; f
     }
 
     if (isDevGhostPaused() && !options.explicit) {
-        outputChannel?.appendLine(`[DevGhost] AI setup skipped (${options.reason}): DevGhost is paused.`);
+        logDebug(`AI setup skipped (${options.reason}): DevGhost is paused.`);
         return false;
     }
 
@@ -738,7 +864,7 @@ async function ensureGeminiReady(options: { explicit: boolean; reason: string; f
         if (options.explicit) {
             await checkApiKeyOnStartup();
         } else {
-            outputChannel?.appendLine(`[DevGhost] AI setup skipped (${options.reason}): AI key is not ready.`);
+            logDebug(`AI setup skipped (${options.reason}): AI key is not ready.`);
         }
         return false;
     }
@@ -749,27 +875,27 @@ async function ensureGeminiReady(options: { explicit: boolean; reason: string; f
         const configured = vscode.workspace.getConfiguration('devghost').get<string>('model', 'auto');
         const resolved = await geminiService.resolveBestModel(options.forceRefresh ?? false);
         if (count === 0) {
-            outputChannel?.appendLine('[DevGhost] Model discovery returned 0 compatible models.');
-            outputChannel?.appendLine(`[DevGhost] Trying fallback model: ${resolved}`);
+            logDebug('Model discovery returned 0 compatible models.');
+            logDebug(`Trying fallback model: ${resolved}`);
             
             // Validate the fallback model
             try {
                 await geminiService.validateModel(resolved, false);
-                outputChannel?.appendLine(`[DevGhost] Fallback model validated: ${resolved}`);
+                logDebug(`Fallback model validated: ${resolved}`);
             } catch (vError) {
                 const vMsg = vError instanceof Error ? vError.message : String(vError);
-                outputChannel?.appendLine(`[DevGhost] Fallback model validation failed: ${vMsg}`);
+                logDebug(`Fallback model validation failed: ${vMsg}`);
                 throw new Error('No compatible AI model is available for this key.');
             }
         } else {
-            outputChannel?.appendLine(`[DevGhost] Discovered ${count} compatible AI models`);
-            outputChannel?.appendLine(`[DevGhost] Configured model: ${configured}`);
-            outputChannel?.appendLine(`[DevGhost] Selected model: ${resolved}`);
+            logDebug(`Discovered ${count} compatible AI models`);
+            logDebug(`Configured model: ${configured}`);
+            logDebug(`Selected model: ${resolved}`);
         }
         return true;
     } catch (error) {
         const errMsg = error instanceof Error ? error.message : String(error);
-        outputChannel?.appendLine(`[DevGhost] AI setup failed (${options.reason}): ${errMsg}`);
+        logDebug(`AI setup failed (${options.reason}): ${errMsg}`);
         if (options.explicit) {
             if (/no compatible gemini model/i.test(errMsg) || /no compatible ai model/i.test(errMsg)) {
                 vscode.window.showErrorMessage('DevGhost: No compatible AI model is available for this key.');
@@ -785,12 +911,182 @@ async function ensureGeminiReady(options: { explicit: boolean; reason: string; f
     }
 }
 
+async function maybePromptForFocusBeforeCloudDraft(): Promise<void> {
+    const currentFocus = contextManager?.getConfig()?.currentFocus?.trim() || '';
+    if (currentFocus.length > 0 || focusPromptHandledThisSession) {
+        return;
+    }
+
+    focusPromptHandledThisSession = true;
+    const selection = await vscode.window.showInformationMessage(
+        'Set a focus to make DevGhost posts sharper?',
+        'Set focus',
+        'Not now'
+    );
+
+    if (selection !== 'Set focus') {
+        return;
+    }
+
+    await contextManager?.setFocus();
+    const updatedFocus = contextManager?.getConfig()?.currentFocus?.trim() || '';
+    if (updatedFocus) {
+        workSignalManager?.recordFocus(updatedFocus);
+    }
+}
+
+async function runCloudDraftFlow(options: CloudDraftFlowOptions): Promise<void> {
+    if (options.automatic) {
+        const eventKey = options.eventKey || options.label;
+        const suppressionReason = getAutoDraftSuppressionReason(eventKey);
+        if (suppressionReason) {
+            logDebug(
+                suppressionReason === 'snoozed'
+                    ? `Auto cloud draft skipped (${options.label}): snooze is active.`
+                    : `Auto cloud draft skipped (${options.label}): event already handled.`
+            );
+            return;
+        }
+
+        await markAutoDraftHandled(eventKey);
+        workSignalManager?.recordAutomaticSuggestion(eventKey);
+    }
+
+    const extensionContext = extensionContextRef;
+    if (!extensionContext) {
+        if (!options.automatic) {
+            vscode.window.showErrorMessage('DevGhost: Post generation is not ready.');
+        }
+        return;
+    }
+
+    const apiBaseUrl = vscode.workspace.getConfiguration('devghost').get<string>('cloudApiBaseUrl', 'https://cloud-ten-steel.vercel.app');
+    let cloudClient: CloudClient;
+    try {
+        cloudClient = new CloudClient(apiBaseUrl);
+    } catch (error) {
+        const message = formatCloudErrorMessage(error);
+        if (!options.automatic) {
+            logError(`Cloud setup failed: ${message}`);
+            vscode.window.showErrorMessage(`DevGhost: ${message}`);
+        } else {
+            logDebug(`Cloud setup failed: ${message}`);
+        }
+        return;
+    }
+
+    const deviceId = await getOrCreateCloudDeviceId(extensionContext);
+    const clientVersion = extensionContext.extension.packageJSON?.version || '0.0.0';
+    const workspaceRoot = resolveWorkspaceRoot() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+    if (!workspaceRoot) {
+        if (!options.automatic) {
+            vscode.window.showWarningMessage('DevGhost: Open a workspace first.');
+        }
+        return;
+    }
+
+    try {
+        const quotaResponse = await cloudClient.getQuota({
+            deviceId,
+            clientVersion,
+        });
+
+        await cloudQuotaState?.setCachedQuota(deviceId, quotaResponse.quota);
+        if (!quotaResponse.quota.canGenerate) {
+            if (!options.automatic) {
+                vscode.window.showInformationMessage('Post limit reached for the last 24 hours.');
+            } else {
+                logDebug('Post generation skipped: quota exhausted.');
+            }
+            return;
+        }
+
+        await maybePromptForFocusBeforeCloudDraft();
+
+        const repetitionSnapshot: RepetitionSnapshot | undefined = cloudRepetitionMemory?.getSnapshot();
+        const requestId = randomUUID();
+        const buildResult: CloudDraftBuildResult = await buildCloudDraftRequest({
+            triggerType: options.triggerType,
+            deviceId,
+            requestId,
+            clientVersion,
+            workspaceRoot,
+            contextManager,
+            historyManager,
+            sessionManager,
+            workSignalManager,
+            repetitionSnapshot,
+            triggerEvidence: options.triggerEvidence,
+        });
+
+        const commitEvidence = buildResult.request.commitEvidence;
+        logDebug(
+            `Cloud request metadata: triggerType=${options.triggerType} hasFocus=${Boolean(buildResult.request.currentFocus?.trim())} hasProjectSummary=${Boolean(buildResult.request.projectSummary?.trim())} changedFileCount=${commitEvidence?.changedFileCount ?? buildResult.changedRelativePathsCount} additions=${commitEvidence?.additions ?? 0} deletions=${commitEvidence?.deletions ?? 0} diffExcerptCount=${commitEvidence?.diffExcerptCount ?? buildResult.excerptCount} contextBytes=${buildResult.contextBytes}`
+        );
+
+        const draftResponse = await cloudClient.postDraft(buildResult.request);
+
+        await cloudQuotaState?.setCachedQuota(deviceId, draftResponse.quota);
+        await cloudRepetitionMemory?.recordDraft(draftResponse.topicTag, draftResponse.angle);
+
+        if (options.automatic) {
+            const selection = await showPostReadyPrompt(true);
+            if (selection === 'pause') {
+                await setDevGhostPaused(true);
+                void Promise.resolve(vscode.window.showInformationMessage('Suggestions paused.')).catch(() => undefined);
+                return;
+            }
+
+            if (selection !== 'review') {
+                return;
+            }
+        } else {
+            const selection = await showPostReadyPrompt(false);
+            if (selection !== 'review') {
+                return;
+            }
+        }
+
+        await showDraftReview(draftResponse.draftText, {
+            onOpen: options.onOpen,
+            onFeedback: async (feedback) => {
+                try {
+                    await cloudClient.postFeedback({
+                        deviceId,
+                        requestId: draftResponse.requestId,
+                        draftId: draftResponse.draftId,
+                        clientVersion,
+                        triggerType: buildResult.request.triggerType,
+                        feedbackType: feedback.feedbackType,
+                        topicTag: draftResponse.topicTag,
+                        angle: draftResponse.angle,
+                        timestampUtc: new Date().toISOString(),
+                        dismissReason: feedback.dismissReason,
+                    });
+                    await cloudRepetitionMemory?.recordFeedback(draftResponse.topicTag, draftResponse.angle, feedback.feedbackType);
+                    logDebug(`Cloud feedback recorded: ${feedback.feedbackType}`);
+                } catch (error) {
+                    logDebug(`Cloud feedback not saved: ${formatCloudErrorMessage(error)}`);
+                }
+            },
+        });
+    } catch (error) {
+        const message = formatCloudErrorMessage(error);
+        if (!options.automatic) {
+            logError(`Post generation failed: ${message}`);
+            vscode.window.showErrorMessage(`DevGhost: ${message}`);
+        } else {
+            logDebug(`Post generation failed: ${message}`);
+        }
+    }
+}
+
 function noteManualActionWhilePaused(): void {
     if (!isDevGhostPaused()) {
         return;
     }
 
-    void vscode.window.showInformationMessage('DevGhost is paused, but you can still create a draft manually.');
+    void vscode.window.showInformationMessage('DevGhost is paused, but you can still write a post manually.');
 }
 
 async function runDraftFlow(options: DraftFlowOptions): Promise<void> {
@@ -798,10 +1094,10 @@ async function runDraftFlow(options: DraftFlowOptions): Promise<void> {
         const eventKey = options.eventKey || options.label;
         const suppressionReason = getAutoDraftSuppressionReason(eventKey);
         if (suppressionReason) {
-            outputChannel?.appendLine(
+            logDebug(
                 suppressionReason === 'snoozed'
-                    ? `[DevGhost] Auto draft skipped (${options.label}): snooze is active.`
-                    : `[DevGhost] Auto draft skipped (${options.label}): event already handled.`
+                    ? `Auto draft skipped (${options.label}): snooze is active.`
+                    : `Auto draft skipped (${options.label}): event already handled.`
             );
             return;
         }
@@ -826,7 +1122,7 @@ async function runDraftFlow(options: DraftFlowOptions): Promise<void> {
 
         if (selection === 'Snooze') {
             await snoozeAutoDraftPrompts();
-            outputChannel?.appendLine('[DevGhost] Auto draft prompts snoozed for 30 minutes.');
+            logDebug('Auto draft prompts snoozed for 30 minutes.');
             return;
         }
 
@@ -848,7 +1144,7 @@ async function runDraftFlow(options: DraftFlowOptions): Promise<void> {
         draft = await options.createDraft();
     } catch (error) {
         const errMsg = error instanceof Error ? error.message : String(error);
-        outputChannel?.appendLine(`[DevGhost] ${options.label} failed: ${errMsg}`);
+        logDebug(`${options.label} failed: ${errMsg}`);
         if (/no compatible gemini model/i.test(errMsg) || /no compatible ai model/i.test(errMsg)) {
             vscode.window.showErrorMessage('DevGhost: No compatible AI model is available for this key.');
         } else if (/429|quota exceeded/i.test(errMsg)) {
@@ -859,9 +1155,9 @@ async function runDraftFlow(options: DraftFlowOptions): Promise<void> {
         return;
     }
     if (isDraftFlowFailure(draft)) {
-        outputChannel?.appendLine(`[DevGhost] ${options.label} failed: ${formatDraftFailureLogMessage(draft)}`);
+        logDebug(`${options.label} failed: ${formatDraftFailureLogMessage(draft)}`);
         if (draft.technicalError) {
-            outputChannel?.appendLine(`[DevGhost] ${options.label} raw error: ${draft.technicalError}`);
+            logDebug(`${options.label} raw error: ${draft.technicalError}`);
         }
         if (!options.automatic) {
             vscode.window.showErrorMessage(`DevGhost: ${formatDraftFailurePopupMessage(draft)}`);
@@ -869,18 +1165,23 @@ async function runDraftFlow(options: DraftFlowOptions): Promise<void> {
         return;
     }
     if (!draft) {
-        outputChannel?.appendLine(`[DevGhost] ${options.label}: API unavailable.`);
+        logDebug(`${options.label}: API unavailable.`);
         return;
     }
 
     await showDraftReview(draft, { onOpen: options.onOpen });
 }
 
-async function handleBreakthroughDraft(durationMinutes: number, failureCount: number, command: string): Promise<void> {
-    if (!agenticBrain) {
-        return;
-    }
+async function runCloudDraftCommand(extensionContext: vscode.ExtensionContext): Promise<void> {
+    noteManualActionWhilePaused();
+    extensionContextRef = extensionContext;
+    await runCloudDraftFlow({
+        triggerType: 'MANUAL_INTENT',
+        label: 'Cloud draft',
+    });
+}
 
+async function handleBreakthroughDraft(durationMinutes: number, failureCount: number, command: string): Promise<void> {
     const eventKey = `friction:${command}:${failureCount}:${Math.floor(durationMinutes / 5)}`;
     if (!await allowAutomaticDraft({
         trigger: 'FRICTION_BREAKTHROUGH',
@@ -896,29 +1197,16 @@ async function handleBreakthroughDraft(durationMinutes: number, failureCount: nu
         return;
     }
 
-    await geminiReadyPromise;
-
-    await runDraftFlow({
+    await runCloudDraftFlow({
         automatic: true,
+        triggerType: 'FRICTION_BREAKTHROUGH',
         eventKey,
         label: 'Breakthrough draft',
-        createDraft: async () => {
-            const baseline = contextManager?.getBaselineSummary() || 'No baseline summary available.';
-            const failedCommands = sessionManager?.getActiveStruggles() || [];
-            const result = await agenticBrain?.process_trigger('FRICTION_BREAKTHROUGH', {
-                baselineSummary: baseline,
-                failedCommands,
-                successCommand: command,
-            } as any);
-
-            if (!result?.ok) {
-                if (result) {
-                    outputChannel?.appendLine(`[DevGhost] Recent fix draft failed: ${result.message}`);
-                }
-                return null;
-            }
-
-            return result.tweet;
+        hints: {
+            failedCommands: sessionManager?.getActiveStruggles(),
+            successCommand: command,
+            durationMinutes,
+            strugglesCount: failureCount,
         },
     });
 }
@@ -927,19 +1215,14 @@ async function handleBreakthroughDraft(durationMinutes: number, failureCount: nu
  * Extension activation.
  */
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+    extensionContextRef = context;
+
     // Create output channel
     outputChannel = vscode.window.createOutputChannel('DevGhost Logs');
     context.subscriptions.push(outputChannel);
 
-    // Welcome message
-    const version = vscode.extensions.getExtension('devghost.devghost')?.packageJSON.version || '3.3.10';
-    outputChannel.appendLine('[DevGhost] ----------------------------------------');
-    outputChannel.appendLine(`[DevGhost] DevGhost ${version} - Quiet build-in-public companion`);
-    outputChannel.appendLine('[DevGhost] ----------------------------------------');
-    outputChannel.appendLine('');
-    outputChannel.appendLine('Watching real coding activity and drafting only when there is enough signal.');
-    outputChannel.appendLine('Now tracking: COMMITS + CONTEXT + STORY');
-    outputChannel.appendLine('');
+    const version = context.extension.packageJSON.version || '3.4.0';
+    logStatus(`DevGhost ${version} started.`);
 
     // Initialize the Context Manager (The Brain) — uses workspaceState only
     contextManager = new ContextManager(context.workspaceState, outputChannel);
@@ -947,13 +1230,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     context.subscriptions.push(contextManager);
     workspaceState = context.workspaceState;
+    cloudQuotaState = new CloudQuotaState(context.globalState);
+    cloudRepetitionMemory = new CloudRepetitionMemory(context.workspaceState);
     workSignalManager = new WorkSignalManager(context.workspaceState, outputChannel);
     workSignalManager.recordFocus(contextManager.getConfig()?.currentFocus || '');
     workSignalManager.recordActiveFile(vscode.window.activeTextEditor?.document ?? null);
 
-    // Phase 10: Model Audit
-    const configuredModel = vscode.workspace.getConfiguration('devghost').get<string>('model', 'auto');
-    outputChannel.appendLine(`[DevGhost] Configured model: ${configuredModel}`);
+    const workspaceRoot = resolveWorkspaceRoot() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+    if (workspaceRoot) {
+        await seedCloudBaselineSummary(workspaceRoot);
+        logStatus('Cloud drafts ready.');
+        logStatus('Watching this workspace.');
+    }
 
     // Initialize the Session Manager (The Nervous System)
     sessionManager = new SessionManager(outputChannel);
@@ -1002,14 +1290,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         logSanitization(event);
     });
     geminiService.setFallbackReporter(({ kind, reason, errorMessage }) => {
-        outputChannel?.appendLine(`[DevGhost] Gemini API (${kind}): ${reason}${errorMessage ? ` - ${errorMessage}` : ''}`);
+        logDebug(`Gemini API (${kind}): ${reason}${errorMessage ? ` - ${errorMessage}` : ''}`);
         if (reason === 'ERROR' && errorMessage && (String(errorMessage).includes('404') || String(errorMessage).includes('401'))) {
             vscode.window.showErrorMessage('DevGhost: No compatible AI model is available for this key.');
         }
     });
 
-    // Load API key from SecretStorage before any handler runs (fixes VSIX: key not ready on first commit)
-    geminiReadyPromise = initializeGeminiFromStorage().then(() => checkApiKeyOnStartup());
+    // Load legacy Gemini key from SecretStorage before any handler runs.
+    geminiReadyPromise = initializeGeminiFromStorage();
 
     // Phase 7: Initialize History Manager (workspaceState only) — before handshake so we can log draft review events
     historyManager = new HistoryManager(context.workspaceState, outputChannel);
@@ -1023,60 +1311,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     const workspaceRootForBrain = resolveWorkspaceRoot() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
     const agentTools = new AgentTools(historyManager, workspaceRootForBrain);
     agenticBrain = new AgenticBrain(geminiService, agentTools);
-
-    // Phase 2: New-workspace handshake — ask for explicit setup before any baseline generation
-    if (!contextManager.hasContext()) {
-        const choice = await vscode.window.showInformationMessage(
-            'Set up DevGhost for this project? This helps DevGhost understand what you are building before it suggests drafts.',
-            { modal: true },
-            'Set up',
-            'Not now'
-        );
-
-        if (choice === 'Set up') {
-            const created = await contextManager.createConfig();
-            if (!created) {
-                return;
-            }
-
-            const workspaceRoot = resolveWorkspaceRoot() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
-            const scan = await scanProjectEnvironment(workspaceRoot);
-
-            const apiKey = await keyManager?.getApiKey();
-            if (!apiKey) {
-                await checkApiKeyOnStartup();
-                return;
-            }
-
-            if (!await ensureGeminiReady({
-                explicit: true,
-                reason: 'project setup',
-            })) {
-                return;
-            }
-
-            const introPrompt = [
-                'You are DevGhost, an assistant that helps developers build in public.',
-                'Using ONLY the scanned environment data below, write a Day One project baseline summary.',
-                'Focus on: tech stack, architecture hints, what kind of product this is, and what a reasonable first public narrative would be.',
-                'Output format:',
-                '- 1 short paragraph (max 5 sentences)',
-                '- then 4-7 bullet points for stack + major folders',
-                '- end with one sentence that sounds like a human dev starting Day One (#BuildInPublic allowed)',
-                '',
-                scan,
-            ].join('\n');
-
-            let baseline = await geminiService?.generateBaselineFromScan(introPrompt);
-
-            if (!baseline || baseline.trim().length === 0) {
-                baseline = `Baseline generation unavailable (no API key / API error).\n\n${scan}`;
-            }
-
-            await contextManager.setBaselineSummary(baseline);
-            workSignalManager?.recordFocus(contextManager?.getConfig()?.currentFocus || '');
-        }
-    }
 
     // Register commands
     registerCommands(context);
@@ -1095,10 +1329,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     // Deep work wrap-up: after the configured active-coding threshold, suggest a review-first draft
     session.onDeepWorkWrapUp(async () => {
-        const brain = agenticBrain;
         const workspaceRoot = resolveWorkspaceRoot() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
         const eventKey = `deep-work:${workspaceRoot || 'workspace'}:${session.getSession().startTime.toISOString()}`;
-        if (!brain || !workspaceRoot) return;
+        if (!workspaceRoot) return;
         if (!await allowAutomaticDraft({
             trigger: 'DEEP_WORK_WRAP_UP',
             eventKey,
@@ -1107,20 +1340,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             return;
         }
 
-        await geminiReadyPromise;
-        await runDraftFlow({
+        await runCloudDraftFlow({
             automatic: true,
+            triggerType: 'DEEP_WORK_WRAP_UP',
             eventKey,
             label: 'Deep work draft',
-            createDraft: async () => {
-                const top3Diffs = await getTop3DiffsForDeepWork(workspaceRoot);
-                const baseline = contextManager?.getBaselineSummary() || 'No baseline summary available.';
-                const result = await brain.process_trigger('DEEP_WORK_WRAP_UP', {
-                    baselineSummary: baseline,
-                    top3Diffs,
-                } as any);
-                return result.ok ? result.tweet : null;
-            },
         });
     });
 
@@ -1161,87 +1385,48 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             }
         );
         context.subscriptions.push(frictionListener);
-        outputChannel.appendLine('[DevGhost] [OK] Friction breakthrough tracking enabled');
+        logDebug('Friction breakthrough tracking enabled');
     } catch {
-        outputChannel.appendLine('[DevGhost] [WARN] Shell Integration not available (friction breakthrough disabled)');
+        logDebug('Shell Integration not available (friction breakthrough disabled)');
     }
-
-    outputChannel.appendLine('[DevGhost] DevGhost is watching this workspace.');
-    outputChannel.appendLine('');
-
-    // Phase 6B: Ask focus on open, then offer a review-first draft
-    setTimeout(async () => {
-        const focus = await contextManager?.askFocusOnOpen();
-        if (focus) {
-            workSignalManager?.recordFocus(focus);
-        }
-        if (focus) {
-            const config = contextManager?.getConfig();
-            const projectName = config?.projectName || 'my project';
-            const eventKey = `focus-intent:${projectName}:${focus}`;
-            await geminiReadyPromise;
-            if (!await allowAutomaticDraft({
-                trigger: 'FOCUS_INTENT',
-                eventKey,
-                label: 'Focus draft',
-            })) {
-                return;
-            }
-
-            const gemini = geminiService;
-            if (!gemini?.isInitialized()) {
-                return;
-            }
-
-            await runDraftFlow({
-                automatic: true,
-                eventKey,
-                label: 'Focus draft',
-                createDraft: async () => {
-                    const context = {
-                        projectName,
-                        mission: config?.mission,
-                        currentFocus: focus,
-                        tone: (config?.tone || 'raw') as 'raw' | 'professional' | 'funny' | 'technical',
-                    };
-                    return await gemini.generateIntentTweet(context, focus);
-                },
-            });
-        }
-    }, 2000);
 }
 
 /**
  * Register all DevGhost commands.
  */
 function registerCommands(context: vscode.ExtensionContext): void {
-    // Command: Initialize project context
+    // Command: Edit project details
     const initCommand = vscode.commands.registerCommand('devghost.initialize', async () => {
-        await contextManager?.createConfig();
+        const created = await contextManager?.createConfig();
+        if (!created) {
+            return;
+        }
+
+        const workspaceRoot = resolveWorkspaceRoot() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+        await seedCloudBaselineSummary(workspaceRoot);
         workSignalManager?.recordFocus(contextManager?.getConfig()?.currentFocus || '');
     });
     context.subscriptions.push(initCommand);
 
-    // Command: Set current focus
+    // Command: Set focus
     const setFocusCommand = vscode.commands.registerCommand('devghost.setFocus', async () => {
         await contextManager?.setFocus();
         workSignalManager?.recordFocus(contextManager?.getConfig()?.currentFocus || '');
     });
     context.subscriptions.push(setFocusCommand);
 
-    // Command: Pause DevGhost
+    // Command: Pause suggestions
     const pauseCommand = vscode.commands.registerCommand('devghost.pause', async () => {
         await setDevGhostPaused(true);
-        outputChannel?.appendLine('[DevGhost] DevGhost is paused. It will not suggest drafts until you resume it.');
-        vscode.window.showInformationMessage('DevGhost is paused. It will not suggest drafts until you resume it.');
+        vscode.window.showInformationMessage('Suggestions paused.');
     });
     context.subscriptions.push(pauseCommand);
 
-    // Command: Resume DevGhost
+    // Command: Resume suggestions
     const resumeCommand = vscode.commands.registerCommand('devghost.resume', async () => {
         await setDevGhostPaused(false);
-        outputChannel?.appendLine('[DevGhost] DevGhost is watching this workspace.');
-        vscode.window.showInformationMessage('DevGhost is watching this workspace.');
+        logStatus('Watching this workspace.');
+        vscode.window.showInformationMessage('Watching this workspace.');
     });
     context.subscriptions.push(resumeCommand);
 
@@ -1250,6 +1435,12 @@ function registerCommands(context: vscode.ExtensionContext): void {
         outputChannel?.show(true);
     });
     context.subscriptions.push(showLogsCommand);
+
+    // Command: Privacy & data use
+    const privacyCommand = vscode.commands.registerCommand('devghost.privacy', async () => {
+        await showPrivacyAndDataUse();
+    });
+    context.subscriptions.push(privacyCommand);
 
     // Command: Reset project context
     const resetProjectContextCommand = vscode.commands.registerCommand('devghost.resetProjectContext', async () => {
@@ -1272,15 +1463,15 @@ function registerCommands(context: vscode.ExtensionContext): void {
         await contextManager?.resetProjectContext();
         await historyManager?.resetHistory();
         workSignalManager?.recordFocus('');
-        outputChannel?.appendLine('[DevGhost] Project context reset.');
+        logStatus('Project context reset.');
         vscode.window.showInformationMessage('Project context reset.');
     });
     context.subscriptions.push(resetProjectContextCommand);
 
-    // Command: Clear AI key
+    // Command: Clear legacy AI key
     const clearAiKeyCommand = vscode.commands.registerCommand('devghost.clearApiKey', async () => {
         const selection = await vscode.window.showInformationMessage(
-            'Clear the AI key stored for DevGhost?',
+            'Clear the legacy Gemini key stored for DevGhost?',
             { modal: true },
             'Clear key',
             'Cancel'
@@ -1292,8 +1483,8 @@ function registerCommands(context: vscode.ExtensionContext): void {
 
         await keyManager?.deleteApiKey();
         geminiService?.clear();
-        outputChannel?.appendLine('[DevGhost] AI key cleared.');
-        vscode.window.showInformationMessage('AI key cleared.');
+        outputChannel?.appendLine('[DevGhost] Legacy Gemini key cleared.');
+        vscode.window.showInformationMessage('Legacy Gemini key cleared.');
     });
     context.subscriptions.push(clearAiKeyCommand);
 
@@ -1317,15 +1508,15 @@ function registerCommands(context: vscode.ExtensionContext): void {
             handledEventKeys: [],
         }));
         await context.workspaceState.update(TERMINAL_FAILURE_STREAK_KEY, []);
-        outputChannel?.appendLine('[DevGhost] Recent activity reset.');
+        logStatus('Recent activity reset.');
         vscode.window.showInformationMessage('Recent activity reset.');
     });
     context.subscriptions.push(resetRecentActivityCommand);
 
-    // Command: Add AI key
+    // Command: Add legacy AI key
     const setApiKeyCommand = vscode.commands.registerCommand('devghost.setApiKey', async () => {
         const apiKey = await vscode.window.showInputBox({
-            prompt: 'Enter your AI key',
+            prompt: 'Enter your legacy Gemini API key',
             password: true,
             placeHolder: 'AIza...',
             ignoreFocusOut: true,
@@ -1336,33 +1527,31 @@ function registerCommands(context: vscode.ExtensionContext): void {
             
             // Runtime Re-initialization
             await geminiService?.initialize(apiKey);
-            const configured = vscode.workspace.getConfiguration('devghost').get<string>('model', 'auto');
             const selected = await geminiService?.resolveBestModel();
-            outputChannel?.appendLine(`[DevGhost] Configured model: ${configured}`);
             outputChannel?.appendLine(`[DevGhost] Selected model: ${selected}`);
             
-            outputChannel?.appendLine('[DevGhost] AI key saved. Validating...');
+            outputChannel?.appendLine('[DevGhost] Legacy Gemini key saved. Validating...');
             
             try {
                 const isValid = await geminiService?.validateKey();
                 if (isValid) {
-                    outputChannel?.appendLine('[DevGhost] AI setup looks good.');
-                    vscode.window.showInformationMessage('DevGhost: AI setup looks good.');
+                    outputChannel?.appendLine('[DevGhost] Legacy AI setup looks good.');
+                    vscode.window.showInformationMessage('DevGhost: Legacy AI setup looks good.');
                 } else {
-                    outputChannel?.appendLine('[DevGhost] AI setup could not be verified.');
-                    vscode.window.showWarningMessage('DevGhost: AI setup could not be verified.');
+                    outputChannel?.appendLine('[DevGhost] Legacy AI setup could not be verified.');
+                    vscode.window.showWarningMessage('DevGhost: Legacy AI setup could not be verified.');
                 }
             } catch (error: any) {
                 const errMsg = error?.message || String(error);
-                outputChannel?.appendLine(`[DevGhost] AI key validation failed: ${errMsg}`);
+                outputChannel?.appendLine(`[DevGhost] Legacy AI key validation failed: ${errMsg}`);
                 if (/no compatible gemini model/i.test(errMsg) || /no compatible ai model/i.test(errMsg)) {
-                    vscode.window.showErrorMessage('DevGhost: No compatible AI model is available for this key.');
+                    vscode.window.showErrorMessage('DevGhost: No compatible AI model is available for this legacy key.');
                 } else if (/401|403|invalid|unauthorized/i.test(errMsg)) {
-                    vscode.window.showErrorMessage('DevGhost: This AI key is invalid.');
+                    vscode.window.showErrorMessage('DevGhost: This legacy AI key is invalid.');
                 } else if (/429|quota exceeded/i.test(errMsg)) {
-                    vscode.window.showErrorMessage('DevGhost: This AI key has no available usage left.');
+                    vscode.window.showErrorMessage('DevGhost: This legacy AI key has no available usage left.');
                 } else {
-                    vscode.window.showErrorMessage('DevGhost: DevGhost could not reach the AI service.');
+                    vscode.window.showErrorMessage('DevGhost: DevGhost could not reach the legacy AI service.');
                 }
             }
         }
@@ -1462,19 +1651,19 @@ function registerCommands(context: vscode.ExtensionContext): void {
     // Phase 9: Check AI setup (support)
     const checkAiConnectionCommand = vscode.commands.registerCommand('devghost.checkAiConnection', async () => {
             outputChannel?.show(true);
-            outputChannel?.appendLine('[DevGhost] Checking AI setup...');
+            outputChannel?.appendLine('[DevGhost] Checking legacy AI setup...');
 
         const apiKey = await keyManager?.getApiKey();
         if (!apiKey) {
-            outputChannel?.appendLine('[DevGhost] AI client not initialized.');
-            vscode.window.showErrorMessage('DevGhost: Add an AI key first.');
+            outputChannel?.appendLine('[DevGhost] Legacy AI client not initialized.');
+            vscode.window.showErrorMessage('DevGhost: Legacy AI setup is not configured.');
             return;
         }
 
         try {
             await vscode.window.withProgress({
                 location: vscode.ProgressLocation.Notification,
-                title: "DevGhost: Checking AI setup...",
+                title: "DevGhost: Checking legacy AI setup...",
                 cancellable: false
             }, async () => {
                 if (!await ensureGeminiReady({
@@ -1488,8 +1677,8 @@ function registerCommands(context: vscode.ExtensionContext): void {
                 // ensureGeminiReady already logged discovery and validation details.
                 const isValid = await geminiService?.validateKey();
                 if (isValid) {
-                    outputChannel?.appendLine('[DevGhost] AI setup looks good.');
-                    vscode.window.showInformationMessage('DevGhost: AI setup looks good.');
+                    outputChannel?.appendLine('[DevGhost] Legacy AI setup looks good.');
+                    vscode.window.showInformationMessage('DevGhost: Legacy AI setup looks good.');
                 }
             });
         } catch (error: any) {
@@ -1502,24 +1691,29 @@ function registerCommands(context: vscode.ExtensionContext): void {
             
             if (isUnavailable) {
                 outputChannel?.appendLine('[DevGhost] No compatible AI model was found for this key.');
-                vscode.window.showErrorMessage('DevGhost: No compatible AI model is available for this key.');
+                vscode.window.showErrorMessage('DevGhost: No compatible AI model is available for this legacy key.');
             } else if (errMsg.includes('429') || errMsg.toLowerCase().includes('quota exceeded')) {
-                const cleanMsg = "This AI key has no available usage left.";
+                const cleanMsg = "This legacy AI key has no available usage left.";
                 outputChannel?.appendLine(`[DevGhost] [ERROR] ${cleanMsg}`);
                 outputChannel?.appendLine(`[DevGhost] Raw error: ${errMsg}`);
                 vscode.window.showErrorMessage(`DevGhost: ${cleanMsg}`);
             } else {
-                outputChannel?.appendLine(`[DevGhost] AI setup failed: ${errMsg}`);
+                outputChannel?.appendLine(`[DevGhost] Legacy AI setup failed: ${errMsg}`);
                 outputChannel?.appendLine(`[DevGhost] Raw error: ${errMsg}`);
                 if (errMsg.toLowerCase().includes('no compatible gemini model') || errMsg.toLowerCase().includes('no compatible ai model')) {
-                    vscode.window.showErrorMessage('DevGhost: No compatible AI model is available for this key.');
+                    vscode.window.showErrorMessage('DevGhost: No compatible AI model is available for this legacy key.');
                 } else {
-                    vscode.window.showErrorMessage('DevGhost: DevGhost could not reach the AI service.');
+                    vscode.window.showErrorMessage('DevGhost: DevGhost could not reach the legacy AI service.');
                 }
             }
         }
     });
     context.subscriptions.push(checkAiConnectionCommand);
+
+    const cloudDraftCommand = vscode.commands.registerCommand('devghost.cloudDraft', async () => {
+        await runCloudDraftCommand(context);
+    });
+    context.subscriptions.push(cloudDraftCommand);
 
     context.subscriptions.push(shareGrindCommand);
 }
@@ -1589,7 +1783,6 @@ async function handleWarmup(summary: string, lastEvents: any[]): Promise<void> {
         .map((event) => event.data?.message)
         .filter((message): message is string => typeof message === 'string' && message.trim().length > 0)
         .slice(-5);
-    await geminiReadyPromise;
     if (!await allowAutomaticDraft({
         trigger: 'WARMUP_RETURN',
         eventKey,
@@ -1601,33 +1794,15 @@ async function handleWarmup(summary: string, lastEvents: any[]): Promise<void> {
         return;
     }
 
-    if (!await ensureGeminiReady({
-        explicit: false,
-        reason: 'return draft',
-    })) {
-        return;
-    }
-
-    // Try to get AI summary
-    let aiSummary = summary;
-    if (geminiService?.isInitialized() && historyManager) {
-        const historyStr = historyManager.getHistoryForAI(10);
-        aiSummary = await geminiService.generateWarmupSummary(projectName, historyStr);
-    }
-
-    await geminiReadyPromise;
-    await runDraftFlow({
+    await runCloudDraftFlow({
         automatic: true,
+        triggerType: 'WARMUP_RETURN',
         eventKey,
         label: 'Return draft',
-        createDraft: async () => {
-            const currentFocus = config?.currentFocus;
-            outputChannel?.appendLine('[DevGhost] Generating return draft...');
-            return await geminiService?.generateReturningTweet(projectName, aiSummary, currentFocus) ?? null;
+        hints: {
+            recentCommits,
         },
     });
-
-    outputChannel?.appendLine(`[DevGhost] Warm-up: ${aiSummary}`);
 }
 
 /**
@@ -1637,7 +1812,6 @@ async function handleSilenceDetected(durationMinutes: number, strugglesCount: nu
     const config = contextManager?.getConfig();
     const projectName = config?.projectName || 'my project';
     const eventKey = `silence:${projectName}:${durationMinutes}:${strugglesCount}:${config?.currentFocus || 'no-focus'}`;
-    await geminiReadyPromise;
     if (!await allowAutomaticDraft({
         trigger: 'SILENCE_BREAKER',
         eventKey,
@@ -1651,29 +1825,15 @@ async function handleSilenceDetected(durationMinutes: number, strugglesCount: nu
         return;
     }
 
-    await runDraftFlow({
+    await runCloudDraftFlow({
         automatic: true,
+        triggerType: 'SILENCE_BREAKER',
         eventKey,
         label: 'Recent work draft',
-        createDraft: async () => {
-            const context = {
-                projectName,
-                mission: config?.mission,
-                currentFocus: config?.currentFocus,
-                tone: config?.tone || 'raw' as const,
-            };
-
-            const struggles = sessionManager?.getActiveStruggles() || [];
-
-            vscode.window.setStatusBarMessage('DevGhost is preparing a draft from recent work...', 3000);
-            outputChannel?.appendLine('[DevGhost] Generating draft from recent work...');
-
-            return await geminiService?.generateGrindPost(
-                context,
-                durationMinutes,
-                strugglesCount,
-                struggles
-            ) ?? null;
+        hints: {
+            durationMinutes,
+            strugglesCount,
+            failedCommands: sessionManager?.getActiveStruggles(),
         },
     });
 }
@@ -1689,7 +1849,7 @@ async function handleSilenceDetected(durationMinutes: number, strugglesCount: nu
  */
 async function handleCommitDetected(analysis: CommitAnalysis): Promise<void> {
     if (!isFreshCommitForSession(analysis)) {
-        outputChannel?.appendLine(`[DevGhost] Existing commit skipped: ${analysis.hash} predates this DevGhost session.`);
+        logDebug(`Existing commit skipped: ${analysis.hash} predates this DevGhost session.`);
         return;
     }
 
@@ -1724,98 +1884,35 @@ async function handleCommitDetected(analysis: CommitAnalysis): Promise<void> {
     }
 
     const scoreDecision = consumeAutomaticDraftDecision(eventKey);
-    const projectName = contextManager?.getConfig()?.projectName?.trim() || 'the app';
-    const currentFocusBeforePrompt = contextManager?.getConfig()?.currentFocus?.trim() || '';
-    const freshTerminalFriction = sessionManager?.getRecentFrictionSummary(30) || undefined;
-    const touchedSymbols = workSignalManager?.getRecentTouchedSymbols(10) || [];
-    const { compactDiffSummary, fileCategories } = buildCompactCommitSummary(analysis);
-    const compactDiffStat = analysis.diffStat ? analysis.diffStat.split('\n').slice(0, 12).join('\n') : undefined;
-    const scoreReasons = scoreDecision?.reasons?.slice(0, 8) || [];
-    const focusConflictNote = buildFocusConflictNote(currentFocusBeforePrompt, analysis, fileCategories);
-    const whyItMatters = inferWhyItMatters(analysis, scoreReasons, fileCategories, projectName);
-    const userFacingResult = inferUserFacingResult(analysis, scoreReasons, fileCategories, projectName);
+    const triggerEvidence = buildCommitEvidence({
+        workspaceRoot: analysis.repoRoot,
+        commitAnalysis: analysis,
+        signalReasons: scoreDecision?.reasons,
+        gateReasons: scoreDecision?.blockers,
+    });
 
-    await runDraftFlow({
+    await runCloudDraftFlow({
         automatic: true,
+        triggerType: 'COMMIT_DETECTED',
         eventKey,
         label: 'Commit draft',
-        offerAddFocus: !currentFocusBeforePrompt,
-        createDraft: async () => {
-            if (!agenticBrain) return null;
-            
-            const baseline = contextManager?.getBaselineSummary() || '(no project context)';
-            const currentFocus = contextManager?.getConfig()?.currentFocus?.trim() || '';
-            
-            // Build the story context
-            const result = await agenticBrain.process_trigger('COMMIT_DETECTED', {
-                projectName,
-                baselineSummary: baseline,
-                commitMessage: analysis.message,
-                changedFiles: analysis.changedFiles,
-                additions: analysis.additions,
-                deletions: analysis.deletions,
-                workType: analysis.workType || 'refactor',
-                sessionMinutes: analysis.sessionMinutes,
-                diffStat: compactDiffStat,
-                focus: currentFocus,
-                terminalFriction: freshTerminalFriction,
-                scoreReasons: scoreDecision?.reasons?.slice(0, 8),
-                touchedSymbols,
-                compactDiffSummary,
-                fileCategories,
-                whyItMatters,
-                userFacingResult,
-                focusConflictNote: focusConflictNote || undefined,
-            });
-
-            if (result.ok) {
-                return result.tweet;
-            }
-
-            return {
-                ok: false,
-                reason: result.reason,
-                message: result.reason === 'API_ERROR'
-                    ? `AI request failed: ${result.message}`
-                    : result.reason === 'NO_KEY'
-                        ? 'AI key is missing.'
-                        : result.reason === 'CLIENT_NOT_READY'
-                            ? 'AI client is not ready.'
-                            : result.reason === 'NO_CONTEXT'
-                                ? 'project context is missing.'
-                                : 'AI returned an empty draft.',
-                technicalError: result.technicalError,
-            };
-        }
+        hints: { commitAnalysis: analysis },
+        triggerEvidence,
     });
 }
 
 // Phase 5 commit-driven drafting removed in Phase 3.
 
 /**
- * Initialize Gemini with stored API key.
- * Also initializes the draft engine for Phase 8 intelligence.
+ * Load legacy Gemini state without auto-starting the old path.
+ * Cloud remains the default, and the legacy path only activates when invoked.
  */
 async function initializeGeminiFromStorage(): Promise<void> {
     const apiKey = await keyManager?.getApiKey();
-    const hasProjectContext = contextManager?.hasContext() ?? false;
-    if (apiKey && geminiService && hasProjectContext) {
-        if (isDevGhostPaused()) {
-            outputChannel?.appendLine('[DevGhost] DevGhost is paused. AI setup will resume when you resume it.');
-            return;
-        }
-
-        const ready = await ensureGeminiReady({
-            explicit: false,
-            reason: 'startup',
-        });
-        if (ready) {
-            outputChannel?.appendLine('[DevGhost] [OK] DevGhost is ready');
-        }
-    } else if (apiKey && geminiService && !hasProjectContext) {
-        outputChannel?.appendLine('[DevGhost] AI key loaded. Set up the project to generate a baseline.');
+    if (apiKey && geminiService) {
+        logDebug('Legacy Gemini key detected.');
     } else {
-        outputChannel?.appendLine('[DevGhost] DevGhost needs an AI key to draft updates.');
+        logDebug('Post suggestions ready.');
     }
 }
 
@@ -1824,22 +1921,21 @@ async function initializeGeminiFromStorage(): Promise<void> {
 // ═══════════════════════════════════════════════════════════════
 
 /**
- * Check if API key is set on startup.
- * Shows a warning notification if missing, with a button to set it.
+ * Check whether legacy Gemini setup exists for explicit old-path commands.
  */
 async function checkApiKeyOnStartup(): Promise<void> {
     const hasKey = await keyManager?.hasApiKey();
     
     if (!hasKey) {
-        outputChannel?.appendLine('[DevGhost] DevGhost needs an AI key to draft updates.');
+        outputChannel?.appendLine('[DevGhost] Legacy Gemini setup is not configured.');
         
         const selection = await vscode.window.showWarningMessage(
-            'DevGhost needs an AI key to draft updates.',
-            'Add AI key',
+            'Legacy Gemini setup is not configured.',
+            'Open legacy setup',
             'Not now'
         );
         
-        if (selection === 'Add AI key') {
+        if (selection === 'Open legacy setup') {
             vscode.commands.executeCommand('devghost.setApiKey');
         }
     }
@@ -1849,6 +1945,6 @@ async function checkApiKeyOnStartup(): Promise<void> {
  * Extension deactivation.
  */
 export function deactivate(): void {
-    outputChannel?.appendLine('[DevGhost] Goodbye! Keep building.');
+    logDebug('DevGhost deactivated.');
 }
 

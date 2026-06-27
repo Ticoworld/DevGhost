@@ -99,11 +99,8 @@ export class SessionManager implements vscode.Disposable {
     }
 
     private initialize(): void {
-        this.outputChannel.appendLine('');
-        this.outputChannel.appendLine(`[DevGhost] Session started at ${this.session.startTime.toLocaleTimeString()}`);
-        this.outputChannel.appendLine('[DevGhost] Smart Command Tracking enabled');
-        this.outputChannel.appendLine(`[DevGhost] Deep work threshold: ${this.deepWorkThresholdMinutes} minutes`);
-        this.outputChannel.appendLine('');
+        this.outputChannel.appendLine('Session started.');
+        this.outputChannel.appendLine('Watching terminal activity.');
 
         this.setupTerminalWatcher();
         this.startSilenceBreaker();
@@ -112,7 +109,6 @@ export class SessionManager implements vscode.Disposable {
         const configListener = vscode.workspace.onDidChangeConfiguration((event) => {
             if (event.affectsConfiguration('devghost.deepWorkMinutes')) {
                 this.refreshDeepWorkThreshold();
-                this.outputChannel.appendLine(`[DevGhost] Deep work threshold updated: ${this.deepWorkThresholdMinutes} minutes`);
             }
         });
         this.disposables.push(configListener);
@@ -132,9 +128,8 @@ export class SessionManager implements vscode.Disposable {
 
             if (!this.deepWorkWrapUpFired && this.totalActiveCodingMs >= this.deepWorkThresholdMs && this.onDeepWorkWrapUpCallback) {
                 this.deepWorkWrapUpFired = true;
-                this.outputChannel.appendLine(`[DevGhost] Deep work session (${this.deepWorkThresholdMinutes}+ min active coding) - triggering review-first wrap-up`);
                 Promise.resolve(this.onDeepWorkWrapUpCallback()).catch((err) => {
-                    this.outputChannel.appendLine(`[DevGhost] Deep work wrap-up error: ${err}`);
+                    this.outputChannel.appendLine(`[error] Deep work wrap-up failed: ${err}`);
                 });
             }
         });
@@ -165,8 +160,6 @@ export class SessionManager implements vscode.Disposable {
             this.onSilenceCallback) {
             
             const durationMinutes = Math.floor(timeSinceCommit / 60000);
-            this.outputChannel.appendLine(`[DevGhost] Silence detected: ${durationMinutes} mins, ${strugglesCount} struggles`);
-            
             this.silenceNotified = true;  // Don't spam
             this.onSilenceCallback(durationMinutes, strugglesCount);
         }
@@ -177,13 +170,13 @@ export class SessionManager implements vscode.Disposable {
      */
     private setupTerminalWatcher(): void {
         // Terminal open/close events
-        const terminalCloseListener = vscode.window.onDidCloseTerminal((terminal) => {
-            this.outputChannel.appendLine(`[DevGhost] Terminal closed: ${terminal.name}`);
+        const terminalCloseListener = vscode.window.onDidCloseTerminal((_terminal) => {
+            // No normal log spam for terminal lifecycle events.
         });
         this.disposables.push(terminalCloseListener);
 
-        const terminalOpenListener = vscode.window.onDidOpenTerminal((terminal) => {
-            this.outputChannel.appendLine(`[DevGhost] Terminal opened: ${terminal.name}`);
+        const terminalOpenListener = vscode.window.onDidOpenTerminal((_terminal) => {
+            // No normal log spam for terminal lifecycle events.
         });
         this.disposables.push(terminalOpenListener);
 
@@ -206,9 +199,9 @@ export class SessionManager implements vscode.Disposable {
                 }
             );
             this.disposables.push(shellExecutionListener);
-            this.outputChannel.appendLine('[DevGhost] [OK] Shell Integration monitoring enabled');
+            this.outputChannel.appendLine('Terminal tracking ready.');
         } catch (error) {
-            this.outputChannel.appendLine('[DevGhost] [WARN] Shell Integration not available');
+            this.outputChannel.appendLine('Terminal tracking limited.');
         }
     }
 
@@ -253,8 +246,6 @@ export class SessionManager implements vscode.Disposable {
             terminalName: source,
         };
 
-        this.outputChannel.appendLine(`[DevGhost] Command: "${this.truncate(command, 50)}" (exit: ${exitCode})`);
-
         if (exitCode === 0) {
             this.handleSuccess(commandEvent);
         } else {
@@ -276,8 +267,7 @@ export class SessionManager implements vscode.Disposable {
             this.recentFailures.shift();
         }
 
-        this.outputChannel.appendLine(`[DevGhost] [FAIL] Struggle recorded: "${this.truncate(event.command, 40)}"`);
-        this.outputChannel.appendLine(`[DevGhost] Active struggles: ${this.recentFailures.length}`);
+        // Struggle details stay in memory for drafting; normal log output stays quiet.
     }
 
     /**
@@ -291,7 +281,6 @@ export class SessionManager implements vscode.Disposable {
         
         if (matchIndex === -1) {
             // No matching failure - this is unrelated success
-        this.outputChannel.appendLine(`[DevGhost] [OK] Success (unrelated): "${this.truncate(event.command, 40)}"`);
             return;
         }
 
@@ -299,25 +288,11 @@ export class SessionManager implements vscode.Disposable {
         // 🎉 VERIFIED WIN! Same command that failed now succeeded!
         // ═══════════════════════════════════════════════════════════════
         
-        const matchedFailure = this.recentFailures[matchIndex];
-        const durationMs = event.timestamp - matchedFailure.timestamp;
-        const durationMinutes = Math.floor(durationMs / 60000);
-        const durationSeconds = Math.floor((durationMs % 60000) / 1000);
-
         // Count how many times this specific command failed
         const failureCount = this.countMatchingFailures(event);
 
         // Remove all matching failures (they're resolved now)
         this.clearMatchingFailures(event);
-
-        this.outputChannel.appendLine('');
-        this.outputChannel.appendLine('## [VERIFIED WIN]');
-        this.outputChannel.appendLine('   VERIFIED WIN!');
-        this.outputChannel.appendLine(`   Command: "${this.truncate(event.command, 40)}"`);
-        this.outputChannel.appendLine(`   Failed ${failureCount}x before succeeding`);
-        this.outputChannel.appendLine(`   Time to fix: ${durationMinutes}m ${durationSeconds}s`);
-        this.outputChannel.appendLine('--------------------------');
-        this.outputChannel.appendLine('');
 
         // Trigger breakthrough callback
         const sessionMinutes = this.getSessionDurationMinutes();
@@ -329,7 +304,7 @@ export class SessionManager implements vscode.Disposable {
                 this.onBreakthroughCallback(sessionMinutes, failureCount, event.command);
             }
         } else {
-            this.outputChannel.appendLine(`[DevGhost] (Quick fix - session ${sessionMinutes}min, needs ${this.MIN_STRUGGLE_MINUTES}min for auto-prompt)`);
+            // Quick fixes stay quiet in the normal log.
         }
     }
 
@@ -400,14 +375,6 @@ export class SessionManager implements vscode.Disposable {
         return this.IGNORED_COMMANDS.some(ignored => 
             baseCommand === ignored || baseCommand.endsWith('/' + ignored)
         );
-    }
-
-    /**
-     * Truncate a string for display.
-     */
-    private truncate(str: string, maxLength: number): string {
-        if (str.length <= maxLength) return str;
-        return str.substring(0, maxLength) + '...';
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -501,7 +468,7 @@ export class SessionManager implements vscode.Disposable {
         this.deepWorkWrapUpFired = false;
         this.lastEditTime = 0;
         this.totalActiveCodingMs = 0;
-        this.outputChannel.appendLine('[DevGhost] Local activity reset');
+        this.outputChannel.appendLine('Local activity reset.');
     }
 
     /**
@@ -509,7 +476,7 @@ export class SessionManager implements vscode.Disposable {
      */
     simulateBreakthrough(): void {
         const minutes = this.getSessionDurationMinutes();
-        this.outputChannel.appendLine(`[DevGhost] Simulating breakthrough after ${minutes} minutes...`);
+        this.outputChannel.appendLine('Simulating breakthrough.');
         
         if (this.onBreakthroughCallback) {
             this.onBreakthroughCallback(minutes || 60, 5, 'npm run build (simulated)');
