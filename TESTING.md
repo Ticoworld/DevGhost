@@ -1,6 +1,6 @@
 # DevGhost Testing Guide
 
-This is for one trusted technical tester using VS Code, Cursor, or Antigravity on a personal or non-sensitive repo.
+This guide is for a technical tester using VS Code, Cursor, or Antigravity on a personal or non-sensitive repo.
 
 ## Who should test
 
@@ -32,7 +32,8 @@ This is for one trusted technical tester using VS Code, Cursor, or Antigravity o
 6. Run `DevGhost: Write a Post Now`.
 7. Confirm the post appears in the review-first UI.
 8. Use `Copy post`, `Open in Twitter/X`, or `Dismiss` only if you want to.
-9. Send feedback.
+9. Run `DevGhost: Show Last Post Decision` and confirm the summary matches what just happened.
+10. Send feedback.
 
 ## Optional legacy check
 

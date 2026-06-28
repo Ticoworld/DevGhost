@@ -8,6 +8,8 @@ Issues use structured templates. When you open a new issue you will be prompted 
 
 Open an issue if you hit a bug, something behaves unexpectedly, or you have a question about how the Cloud-first flow works.
 
+For automatic commit or quota questions, include the output from `DevGhost: Show Last Post Decision` if you can reproduce the issue safely. That summary helps explain whether DevGhost skipped, sent, or accepted a draft without exposing raw code or draft text.
+
 ## What to include in a bug report
 
 The bug report template will ask for these automatically. If you are filing outside the template, include:
@@ -19,6 +21,7 @@ The bug report template will ask for these automatically. If you are filing outs
 - The command you ran, such as `DevGhost: Write a Post Now`, `DevGhost: Set Focus`, or a legacy Gemini command
 - Whether you changed `devghost.cloudApiBaseUrl`
 - The output from `DevGhost: View Logs`
+- The output from `DevGhost: Show Last Post Decision` for automatic skips or quota issues
 - The exact error text and what you expected to happen
 
 ## What NOT to include

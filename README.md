@@ -2,8 +2,6 @@
 
 DevGhost is a Cloud-first VS Code extension that watches real coding activity and suggests build-in-public posts for review. DevGhost Cloud is the default path. Every post is shown for review first, and DevGhost never posts automatically.
 
-This is a beta build.
-
 ## Demo
 
 [![DevGhost demo: review-first draft flow](images/demo.gif)](https://youtu.be/K5C65atH3Xk)
