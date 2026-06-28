@@ -60,8 +60,25 @@ export default async function handler(req: ApiRequestLike, res: ApiResponseLike)
             throw quotaExceeded();
         }
 
-        if (repetition.shouldReject) {
+        if (repetition.shouldReject && quotaMode !== 'qa') {
             throw buildRepetitionError(repetition);
+        }
+
+        if (repetition.shouldReject && quotaMode === 'qa') {
+            logInfo('Draft repetition hard reject bypassed for QA mode', {
+                route: '/api/draft',
+                requestId: request.requestId,
+                deviceId: request.deviceId,
+                triggerType: request.triggerType,
+                clientVersion,
+                quotaMode,
+                topicTag: repetition.topicTag,
+                angle: repetition.angle,
+                repetitionScore: repetition.score,
+                repetitionShouldReject: repetition.shouldReject,
+                repetitionBypassed: true,
+                durationMs: Date.now() - startedAt,
+            });
         }
 
         const draftId = randomUUID();

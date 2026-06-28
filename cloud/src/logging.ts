@@ -27,6 +27,11 @@ export interface LogMeta {
     retryAttempted?: boolean;
     field?: string;
     feedbackType?: string;
+    topicTag?: string;
+    angle?: string;
+    repetitionScore?: number;
+    repetitionShouldReject?: boolean;
+    repetitionBypassed?: boolean;
 }
 
 function fingerprint(value: string | undefined): string | undefined {

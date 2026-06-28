@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.4.6 - Gate reliability fix
+
+- High-signal commits can now bypass the local automatic cooldown instead of being silently dropped.
+- Automatic failure backoff stays scoped to the same event and QA mode can bypass it for repeat testing.
+- Decision records now preserve gate score, cooldown state, QA bypass state, and prompt choices more truthfully.
+- Cloud error handling now surfaces safe specific skip reasons for repetition, timeout, rate limit, structure, and token failures.
+- QA repetition hard rejects are bypassed in Cloud while still logging safe metadata only.
+
 ## 3.4.5 - Generation parity and reliability fix
 
 - Cloud generation now uses a larger output budget and structured JSON output so Gemini 3.x posts can finish cleanly instead of starving on reasoning tokens.

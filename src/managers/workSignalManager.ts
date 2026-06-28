@@ -6,6 +6,9 @@ import type { CommitAnalysis } from './gitManager';
 
 const AUTO_DRAFT_SCORE_THRESHOLD = 70;
 const AUTO_DRAFT_COOLDOWN_MINUTES = 45;
+const AUTO_DRAFT_HIGH_SIGNAL_BYPASS_SCORE = 100;
+const AUTO_DRAFT_HIGH_SIGNAL_BYPASS_MIN_FILES = 5;
+const AUTO_DRAFT_HIGH_SIGNAL_BYPASS_MIN_CHURN = 200;
 const RECOVERY_SIGNAL_TTL_MINUTES = 45;
 const BURST_RESET_MINUTES = 10;
 const STABILITY_PAUSE_MINUTES = 8;
@@ -33,6 +36,7 @@ export interface AutomaticDraftHints {
 export interface AutomaticDraftInput {
     trigger: AutomaticDraftTrigger;
     eventKey: string;
+    qaMode: boolean;
     workspaceRoot: string;
     projectName: string;
     currentFocus: string;
@@ -50,6 +54,11 @@ export interface AutomaticDraftDecision {
     reasons: string[];
     blockers: string[];
     burstStable: boolean;
+    cooldownChecked: boolean;
+    cooldownBlocked: boolean;
+    cooldownBypassed: boolean;
+    highSignalBypassUsed: boolean;
+    qaBypassUsed: boolean;
 }
 
 interface AutoDraftMeta {
@@ -374,6 +383,19 @@ export class WorkSignalManager {
         return symbols.slice(Math.max(0, symbols.length - Math.max(1, limit)));
     }
 
+    private isHighSignalCommit(commit: CommitAnalysis | undefined, score: number): boolean {
+        if (!commit) return false;
+
+        const churn = Math.max(0, commit.additions ?? 0) + Math.max(0, commit.deletions ?? 0);
+        const meaningfulWorkType = commit.workType === 'feature' || commit.workType === 'bugfix' || commit.workType === 'security';
+        const strongMetadata = meaningfulWorkType && (
+            commit.filesChanged >= AUTO_DRAFT_HIGH_SIGNAL_BYPASS_MIN_FILES ||
+            churn >= AUTO_DRAFT_HIGH_SIGNAL_BYPASS_MIN_CHURN
+        );
+
+        return score >= AUTO_DRAFT_HIGH_SIGNAL_BYPASS_SCORE || strongMetadata;
+    }
+
     evaluateAutomaticDraft(input: AutomaticDraftInput): AutomaticDraftDecision {
         const now = Date.now();
         const snapshot = this.buildSnapshot(now, input.focusAgeMinutes, input.sessionMinutes, input.workspaceRoot, input.hints);
@@ -381,14 +403,15 @@ export class WorkSignalManager {
         const reasons: string[] = [];
         const blockers: string[] = [];
         let score = 0;
+        const commit = input.hints?.commitAnalysis;
+        let cooldownChecked = false;
+        let cooldownBlocked = false;
+        let cooldownBypassed = false;
+        let highSignalBypassUsed = false;
+        let qaBypassUsed = false;
 
         if (!input.currentFocus.trim() && input.sessionMinutes < 20 && snapshot.commitCount === 0 && snapshot.recoveryCount === 0) {
             blockers.push('not enough focus or session context yet');
-        }
-
-        const recentAutoSuggestionMinutes = snapshot.recentAutoSuggestionMinutes;
-        if (recentAutoSuggestionMinutes !== null && recentAutoSuggestionMinutes < AUTO_DRAFT_COOLDOWN_MINUTES) {
-            blockers.push(`auto draft cooldown active (${recentAutoSuggestionMinutes}m since last suggestion)`);
         }
 
         if (snapshot.onlyNoiseFilesChanged && input.trigger !== 'COMMIT_DETECTED') {
@@ -413,7 +436,6 @@ export class WorkSignalManager {
         }
 
         const isDocsFocused = this.isDocsFocused(input.currentFocus);
-        const commit = input.hints?.commitAnalysis;
         const isMeaningfulCommit = commit && (
             commit.workType === 'feature' || 
             commit.workType === 'bugfix' || 
@@ -478,6 +500,11 @@ export class WorkSignalManager {
             reasons.push('focus missing -20');
         }
 
+        const scoreBeforeCooldownPenalty = score;
+        const recentAutoSuggestionMinutes = snapshot.recentAutoSuggestionMinutes;
+        const highSignalCommit = input.trigger === 'COMMIT_DETECTED' && this.isHighSignalCommit(commit, scoreBeforeCooldownPenalty);
+        cooldownChecked = true;
+
         if (snapshot.onlyFormattingOrDocsChanged) {
             if (isDocsFocused) {
                 score += 10;
@@ -494,8 +521,15 @@ export class WorkSignalManager {
         }
 
         if (snapshot.recentAutoSuggestionMinutes !== null && snapshot.recentAutoSuggestionMinutes < 60) {
-            score -= 60;
-            reasons.push('recent automatic draft suggestion -60');
+            if (highSignalCommit || input.qaMode) {
+                highSignalBypassUsed = true;
+                reasons.push(highSignalCommit
+                    ? 'recent automatic draft suggestion bypassed for high-signal commit'
+                    : 'recent automatic draft suggestion bypassed for QA mode');
+            } else {
+                score -= 60;
+                reasons.push('recent automatic draft suggestion -60');
+            }
         }
 
         if (snapshot.burstHasStabilitySignal) {
@@ -536,6 +570,20 @@ export class WorkSignalManager {
             score = Math.min(score, 25);
         }
 
+        if (recentAutoSuggestionMinutes !== null && recentAutoSuggestionMinutes < AUTO_DRAFT_COOLDOWN_MINUTES) {
+            if (input.qaMode) {
+                qaBypassUsed = true;
+                cooldownBypassed = true;
+                reasons.push(`QA mode bypassed auto draft cooldown (${recentAutoSuggestionMinutes}m since last suggestion)`);
+            } else if (highSignalCommit) {
+                cooldownBypassed = true;
+                reasons.push(`high-signal commit bypassed auto draft cooldown (${recentAutoSuggestionMinutes}m since last suggestion)`);
+            } else {
+                cooldownBlocked = true;
+                blockers.push(`auto draft cooldown active (${recentAutoSuggestionMinutes}m since last suggestion)`);
+            }
+        }
+
         if (score < AUTO_DRAFT_SCORE_THRESHOLD) {
             blockers.push(`score ${score}/${AUTO_DRAFT_SCORE_THRESHOLD} below threshold`);
         }
@@ -548,6 +596,11 @@ export class WorkSignalManager {
             reasons: this.uniqueOrdered(reasons),
             blockers: this.uniqueOrdered(blockers),
             burstStable: snapshot.burstHasStabilitySignal,
+            cooldownChecked,
+            cooldownBlocked,
+            cooldownBypassed,
+            highSignalBypassUsed,
+            qaBypassUsed,
         };
     }
 

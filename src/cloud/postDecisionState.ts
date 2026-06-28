@@ -6,12 +6,16 @@ const MAX_RECORD_AGE_MS = 24 * 60 * 60 * 1000;
 
 export type PostDecisionQuotaMode = 'normal' | 'qa';
 
+export type PostDecisionPostReadyChoice = 'review' | 'not_now' | 'pause';
+export type PostDecisionReviewChoice = 'copy' | 'open_x' | 'dismiss';
+
 export type PostDecisionBlocker =
     | 'none'
     | 'paused'
     | 'baseline_suppressed'
     | 'already_handled'
     | 'cooldown_active'
+    | 'failure_backoff'
     | 'not_enough_context'
     | 'noise_only'
     | 'burst_unstable'
@@ -31,6 +35,13 @@ export type PostDecisionBlocker =
 export type PostDecisionSkipReason =
     | PostDecisionBlocker
     | `invalid_post_shape_${string}`
+    | 'repetition_hard_reject'
+    | 'provider_timeout'
+    | 'provider_rate_limited'
+    | 'structured_response_invalid'
+    | 'sanitization_required'
+    | 'context_too_large'
+    | 'duplicate_event'
     | 'manual_cancelled';
 
 export type PostDecisionCloudStatus =
@@ -53,6 +64,13 @@ export interface PostDecisionRecord {
     quotaMode: PostDecisionQuotaMode;
     quotaRemaining: number | null;
     cooldownActive: boolean;
+    qaMode: boolean;
+    cooldownChecked: boolean;
+    cooldownBlocked: boolean;
+    cooldownBypassed: boolean;
+    highSignalBypassUsed: boolean;
+    qaBypassUsed: boolean;
+    failureBackoffApplied: boolean;
     alreadyHandled: boolean;
     baselineSuppressed: boolean;
     focusPresent: boolean;
@@ -64,6 +82,8 @@ export interface PostDecisionRecord {
     requestSent: boolean;
     cloudStatus: PostDecisionCloudStatus;
     postAccepted: boolean;
+    postReadyPromptChoice: PostDecisionPostReadyChoice | null;
+    draftReviewChoice: PostDecisionReviewChoice | null;
     skipReason: PostDecisionSkipReason | null;
     timestampUtc: string;
 }
@@ -84,6 +104,13 @@ function createDefaultRecord(update: PostDecisionUpdate): PostDecisionRecord {
         quotaMode: 'normal',
         quotaRemaining: null,
         cooldownActive: false,
+        qaMode: false,
+        cooldownChecked: false,
+        cooldownBlocked: false,
+        cooldownBypassed: false,
+        highSignalBypassUsed: false,
+        qaBypassUsed: false,
+        failureBackoffApplied: false,
         alreadyHandled: false,
         baselineSuppressed: false,
         focusPresent: false,
@@ -95,6 +122,8 @@ function createDefaultRecord(update: PostDecisionUpdate): PostDecisionRecord {
         requestSent: false,
         cloudStatus: 'not_sent',
         postAccepted: false,
+        postReadyPromptChoice: null,
+        draftReviewChoice: null,
         skipReason: null,
         timestampUtc: new Date().toISOString(),
         ...update,
@@ -155,6 +184,10 @@ function formatNumber(value: number | null): string {
     return value === null ? 'n/a' : String(value);
 }
 
+function formatChoice(value: string | null): string {
+    return value ?? 'n/a';
+}
+
 export function buildPostDecisionSummary(record: PostDecisionRecord | null): string[] {
     if (!record) {
         return ['Last post decision: none recorded.'];
@@ -176,8 +209,14 @@ export function buildPostDecisionSummary(record: PostDecisionRecord | null): str
         `Commit hash: ${record.commitHashShort ?? 'n/a'}`,
         `Gate allowed: ${formatYesNo(record.gateAllowed)}`,
         `Gate score: ${formatNumber(record.gateScore)}`,
+        `QA mode: ${formatYesNo(record.qaMode)}`,
+        `QA bypass used: ${formatYesNo(record.qaBypassUsed)}`,
+        `Cooldown checked: ${formatYesNo(record.cooldownChecked)}`,
+        `Cooldown blocked: ${formatYesNo(record.cooldownBlocked)}`,
+        `Cooldown bypassed: ${formatYesNo(record.cooldownBypassed)}`,
+        `High-signal bypass: ${formatYesNo(record.highSignalBypassUsed)}`,
+        `Failure backoff: ${formatYesNo(record.failureBackoffApplied)}`,
         `Already handled: ${formatYesNo(record.alreadyHandled)}`,
-        `Cooldown active: ${formatYesNo(record.cooldownActive)}`,
         `Baseline suppressed: ${formatYesNo(record.baselineSuppressed)}`,
         `Focus present: ${formatYesNo(record.focusPresent)}`,
         `Project summary present: ${formatYesNo(record.projectSummaryPresent)}`,
@@ -188,6 +227,8 @@ export function buildPostDecisionSummary(record: PostDecisionRecord | null): str
         `Cloud request sent: ${formatYesNo(record.requestSent)}`,
         `Cloud status: ${record.cloudStatus}`,
         `Post accepted: ${formatYesNo(record.postAccepted)}`,
+        `Post-ready choice: ${formatChoice(record.postReadyPromptChoice)}`,
+        `Review choice: ${formatChoice(record.draftReviewChoice)}`,
         `Timestamp: ${record.timestampUtc}`,
     ];
 }

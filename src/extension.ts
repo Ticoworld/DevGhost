@@ -12,7 +12,7 @@ import { getOrCreateCloudDeviceId } from './cloud/deviceId';
 import { CloudQuotaState } from './cloud/quotaState';
 import { CloudRepetitionMemory, type RepetitionSnapshot } from './cloud/repetitionMemory';
 import { FREE_DRAFT_LIMIT, type CommitEvidence, type DismissReason, type FeedbackType, type QuotaSnapshot, type TriggerType } from './cloud/contracts';
-import { buildPostDecisionSummary, PostDecisionState, type PostDecisionBlocker, type PostDecisionQuotaMode, type PostDecisionSkipReason } from './cloud/postDecisionState';
+import { buildPostDecisionSummary, PostDecisionState, type PostDecisionBlocker, type PostDecisionPostReadyChoice, type PostDecisionQuotaMode, type PostDecisionReviewChoice, type PostDecisionSkipReason } from './cloud/postDecisionState';
 
 /**
  * DevGhost 2.0 - Session-Based "Build in Public" Automation
@@ -191,6 +191,10 @@ function detectQuotaMode(quota?: QuotaSnapshot | null): PostDecisionQuotaMode {
     return 'normal';
 }
 
+function isQaMode(): boolean {
+    return detectQuotaMode() === 'qa';
+}
+
 function normalizeAutomaticGateBlocker(blockers: string[] | undefined): PostDecisionBlocker {
     const joined = (blockers ?? []).join(' ').toLowerCase();
     if (!joined) {
@@ -205,6 +209,9 @@ function normalizeAutomaticGateBlocker(blockers: string[] | undefined): PostDeci
     if (joined.includes('auto draft cooldown active')) {
         return 'cooldown_active';
     }
+    if (joined.includes('failure backoff')) {
+        return 'failure_backoff';
+    }
     if (joined.includes('only generated, lock, or build output files changed')) {
         return 'noise_only';
     }
@@ -217,32 +224,112 @@ function normalizeAutomaticGateBlocker(blockers: string[] | undefined): PostDeci
     return 'below_threshold';
 }
 
-function normalizeCloudSkipReason(code: string | null): PostDecisionSkipReason {
-    if (!code) {
+function normalizeCloudSkipReason(errorCode: string | null, providerFailureReason: string | null): PostDecisionSkipReason {
+    if (providerFailureReason) {
+        if (/^invalid_post_shape_/i.test(providerFailureReason)) {
+            return providerFailureReason as PostDecisionSkipReason;
+        }
+
+        switch (providerFailureReason) {
+            case 'max_tokens':
+            case 'repetition_hard_reject':
+            case 'provider_timeout':
+            case 'provider_rate_limited':
+            case 'structured_response_invalid':
+            case 'sanitization_required':
+            case 'context_too_large':
+            case 'duplicate_event':
+                return providerFailureReason;
+            default:
+                break;
+        }
+    }
+
+    if (!errorCode) {
         return 'cloud_failed';
     }
 
-    if (/^invalid_post_shape_/i.test(code)) {
-        return code as PostDecisionSkipReason;
+    switch (errorCode) {
+        case 'max_tokens':
+            return 'max_tokens';
+        case 'REPETITIVE_CONTEXT':
+            return 'repetition_hard_reject';
+        case 'CONTEXT_TOO_LARGE':
+            return 'context_too_large';
+        case 'SANITIZATION_REQUIRED':
+            return 'sanitization_required';
+        case 'QUOTA_EXCEEDED':
+            return 'quota_exhausted';
+        case 'PROVIDER_RATE_LIMITED':
+            return 'provider_rate_limited';
+        case 'UPSTREAM_TIMEOUT':
+            return 'provider_timeout';
+        case 'PROVIDER_ERROR':
+            return 'cloud_failed';
+        case 'INVALID_RESPONSE':
+            return 'structured_response_invalid';
+        case 'DUPLICATE_EVENT':
+            return 'duplicate_event';
+        case 'BAD_REQUEST':
+            return 'cloud_failed';
+        case 'REQUEST_ABORTED':
+            return 'request_aborted';
+        case 'cloud_rate_limited':
+            return 'provider_rate_limited';
+        case 'cloud_timeout':
+            return 'provider_timeout';
+        case 'cloud_invalid_post_shape':
+            return 'cloud_invalid_post_shape';
+        case 'cloud_failed':
+        default:
+            return 'cloud_failed';
+    }
+}
+
+function normalizeCloudBlocker(skipReason: PostDecisionSkipReason): PostDecisionBlocker {
+    if (/^invalid_post_shape_/i.test(skipReason)) {
+        return 'cloud_invalid_post_shape';
     }
 
-    switch (code) {
+    switch (skipReason) {
         case 'max_tokens':
             return 'max_tokens';
         case 'quota_exhausted':
             return 'quota_exhausted';
+        case 'provider_rate_limited':
         case 'cloud_rate_limited':
             return 'cloud_rate_limited';
+        case 'provider_timeout':
         case 'cloud_timeout':
             return 'cloud_timeout';
         case 'request_aborted':
             return 'request_aborted';
         case 'cloud_invalid_post_shape':
+        case 'repetition_hard_reject':
+        case 'structured_response_invalid':
+        case 'sanitization_required':
+        case 'context_too_large':
+        case 'duplicate_event':
             return 'cloud_invalid_post_shape';
+        case 'manual_cancelled':
         case 'cloud_failed':
-        case 'cloud_provider_error':
         default:
             return 'cloud_failed';
+    }
+}
+
+function normalizePostReadyPromptChoice(choice: PostReadyPromptResult): PostDecisionPostReadyChoice {
+    return choice;
+}
+
+function normalizeDraftReviewChoice(feedbackType: FeedbackType): PostDecisionReviewChoice {
+    switch (feedbackType) {
+        case 'copied':
+            return 'copy';
+        case 'opened_x':
+            return 'open_x';
+        case 'dismissed':
+            return 'dismiss';
     }
 }
 
@@ -869,6 +956,7 @@ function isFreshCommitForSession(commitAnalysis: CommitAnalysis): boolean {
 async function allowAutomaticDraft(options: AutomaticDraftGateOptions): Promise<boolean> {
     const eventId = options.eventId || randomUUID();
     const commitAnalysis = options.hints?.commitAnalysis;
+    const qaMode = isQaMode();
     const nowIso = new Date().toISOString();
     const baseRecord = {
         eventId,
@@ -882,6 +970,13 @@ async function allowAutomaticDraft(options: AutomaticDraftGateOptions): Promise<
         quotaMode: detectQuotaMode(),
         quotaRemaining: null,
         cooldownActive: false,
+        qaMode,
+        cooldownChecked: false,
+        cooldownBlocked: false,
+        cooldownBypassed: false,
+        highSignalBypassUsed: false,
+        qaBypassUsed: false,
+        failureBackoffApplied: false,
         alreadyHandled: false,
         baselineSuppressed: false,
         focusPresent: Boolean((contextManager?.getConfig()?.currentFocus || '').trim()),
@@ -893,19 +988,27 @@ async function allowAutomaticDraft(options: AutomaticDraftGateOptions): Promise<
         requestSent: false,
         cloudStatus: 'not_sent' as const,
         postAccepted: false,
+        postReadyPromptChoice: null,
+        draftReviewChoice: null,
         skipReason: null,
         timestampUtc: nowIso,
     };
 
-    if (isAutomaticDraftFailureBackoffActive(options.eventKey)) {
+    if (!qaMode && isAutomaticDraftFailureBackoffActive(options.eventKey)) {
         logDebug(`Auto draft skipped (${options.label}): recent Cloud failure backoff is active.`);
         await postDecisionState?.upsert({
             ...baseRecord,
             gateAllowed: false,
-            blocker: 'retry_backoff',
-            skipReason: 'retry_backoff',
+            failureBackoffApplied: true,
+            blocker: 'failure_backoff',
+            skipReason: 'failure_backoff',
         });
         return false;
+    }
+
+    if (qaMode && isAutomaticDraftFailureBackoffActive(options.eventKey)) {
+        baseRecord.qaBypassUsed = true;
+        logDebug(`Auto draft QA bypass (${options.label}): recent Cloud failure backoff ignored.`);
     }
 
     if (isDevGhostPaused()) {
@@ -953,6 +1056,7 @@ async function allowAutomaticDraft(options: AutomaticDraftGateOptions): Promise<
     const decision = tracker.evaluateAutomaticDraft({
         trigger: options.trigger,
         eventKey: options.eventKey,
+        qaMode,
         workspaceRoot,
         projectName: config?.projectName || 'your project',
         currentFocus,
@@ -971,7 +1075,12 @@ async function allowAutomaticDraft(options: AutomaticDraftGateOptions): Promise<
             gateAllowed: false,
             gateScore: decision.score,
             blocker: normalizeAutomaticGateBlocker(decision.blockers),
-            cooldownActive: decision.blockers.some((blocker) => /cooldown active/i.test(blocker)),
+            cooldownActive: decision.cooldownBlocked,
+            cooldownChecked: decision.cooldownChecked,
+            cooldownBlocked: decision.cooldownBlocked,
+            cooldownBypassed: decision.cooldownBypassed,
+            highSignalBypassUsed: decision.highSignalBypassUsed,
+            qaBypassUsed: decision.qaBypassUsed,
             skipReason: normalizeAutomaticGateBlocker(decision.blockers),
         });
         return false;
@@ -983,7 +1092,12 @@ async function allowAutomaticDraft(options: AutomaticDraftGateOptions): Promise<
         gateAllowed: true,
         gateScore: decision.score,
         blocker: null,
-        cooldownActive: decision.blockers.some((blocker) => /cooldown active/i.test(blocker)),
+        cooldownActive: decision.cooldownBlocked,
+        cooldownChecked: decision.cooldownChecked,
+        cooldownBlocked: decision.cooldownBlocked,
+        cooldownBypassed: decision.cooldownBypassed,
+        highSignalBypassUsed: decision.highSignalBypassUsed,
+        qaBypassUsed: decision.qaBypassUsed,
         skipReason: null,
     });
     return true;
@@ -1168,18 +1282,26 @@ async function runCloudDraftFlow(options: CloudDraftFlowOptions): Promise<void> 
     const commitDetected = Boolean(options.commitHashShort || options.triggerEvidence || options.triggerType === 'COMMIT_DETECTED');
     const currentFocus = contextManager?.getConfig()?.currentFocus?.trim() || '';
     const currentProjectSummaryPresent = Boolean(contextManager?.hasBaselineSummary());
+    const qaMode = isQaMode();
     await postDecisionState?.upsert({
         eventId,
         triggerType: options.triggerType,
         automatic: Boolean(options.automatic),
         commitDetected,
         commitHashShort: options.commitHashShort ?? null,
-        gateAllowed: options.automatic ? automaticDecision?.decision.allowed ?? true : null,
+        gateAllowed: options.automatic ? automaticDecision?.decision.allowed ?? null : null,
         gateScore: automaticDecision?.decision.score ?? null,
         blocker: null,
         quotaMode: detectQuotaMode(),
         quotaRemaining: null,
         cooldownActive: false,
+        qaMode,
+        cooldownChecked: automaticDecision?.decision.cooldownChecked ?? false,
+        cooldownBlocked: automaticDecision?.decision.cooldownBlocked ?? false,
+        cooldownBypassed: automaticDecision?.decision.cooldownBypassed ?? false,
+        highSignalBypassUsed: automaticDecision?.decision.highSignalBypassUsed ?? false,
+        qaBypassUsed: automaticDecision?.decision.qaBypassUsed ?? false,
+        failureBackoffApplied: false,
         alreadyHandled: false,
         baselineSuppressed: false,
         focusPresent: Boolean(currentFocus),
@@ -1214,6 +1336,8 @@ async function runCloudDraftFlow(options: CloudDraftFlowOptions): Promise<void> 
                 cloudStatus: 'not_sent',
                 requestSent: false,
                 postAccepted: false,
+                postReadyPromptChoice: null,
+                draftReviewChoice: null,
             });
             return;
         }
@@ -1233,6 +1357,8 @@ async function runCloudDraftFlow(options: CloudDraftFlowOptions): Promise<void> 
             cloudStatus: 'not_sent',
             requestSent: false,
             postAccepted: false,
+            postReadyPromptChoice: null,
+            draftReviewChoice: null,
         });
         return;
     }
@@ -1268,6 +1394,8 @@ async function runCloudDraftFlow(options: CloudDraftFlowOptions): Promise<void> 
             cloudStatus: 'not_sent',
             requestSent: false,
             postAccepted: false,
+            postReadyPromptChoice: null,
+            draftReviewChoice: null,
         });
         return;
     }
@@ -1288,21 +1416,23 @@ async function runCloudDraftFlow(options: CloudDraftFlowOptions): Promise<void> 
             quotaRemaining: quotaResponse.quota.remaining,
         });
         if (!quotaResponse.quota.canGenerate) {
-            await postDecisionState?.upsert({
-                eventId,
-                triggerType: options.triggerType,
-                automatic: Boolean(options.automatic),
-                quotaMode,
-                quotaRemaining: quotaResponse.quota.remaining,
-                blocker: 'quota_exhausted',
-                skipReason: 'quota_exhausted',
-                cloudStatus: 'quota_exhausted',
-                requestSent: false,
-                postAccepted: false,
-            });
-            await showQuotaLimitReachedNotice(deviceId, quotaResponse.quota, options.automatic);
-            return;
-        }
+        await postDecisionState?.upsert({
+            eventId,
+            triggerType: options.triggerType,
+            automatic: Boolean(options.automatic),
+            quotaMode,
+            quotaRemaining: quotaResponse.quota.remaining,
+            blocker: 'quota_exhausted',
+            skipReason: 'quota_exhausted',
+            cloudStatus: 'quota_exhausted',
+            requestSent: false,
+            postAccepted: false,
+            postReadyPromptChoice: null,
+            draftReviewChoice: null,
+        });
+        await showQuotaLimitReachedNotice(deviceId, quotaResponse.quota, options.automatic);
+        return;
+    }
 
         await maybePromptForFocusBeforeCloudDraft();
 
@@ -1337,6 +1467,12 @@ async function runCloudDraftFlow(options: CloudDraftFlowOptions): Promise<void> 
             additions: commitEvidence?.additions ?? null,
             deletions: commitEvidence?.deletions ?? null,
             diffExcerptCount: commitEvidence?.diffExcerptCount ?? buildResult.excerptCount,
+            qaMode,
+            cooldownChecked: automaticDecision?.decision.cooldownChecked ?? false,
+            cooldownBlocked: automaticDecision?.decision.cooldownBlocked ?? false,
+            cooldownBypassed: automaticDecision?.decision.cooldownBypassed ?? false,
+            highSignalBypassUsed: automaticDecision?.decision.highSignalBypassUsed ?? false,
+            qaBypassUsed: automaticDecision?.decision.qaBypassUsed ?? false,
         });
         logDebug(
             `Cloud request metadata: triggerType=${options.triggerType} hasFocus=${Boolean(buildResult.request.currentFocus?.trim())} hasProjectSummary=${Boolean(buildResult.request.projectSummary?.trim())} changedFileCount=${commitEvidence?.changedFileCount ?? buildResult.changedRelativePathsCount} additions=${commitEvidence?.additions ?? 0} deletions=${commitEvidence?.deletions ?? 0} diffExcerptCount=${commitEvidence?.diffExcerptCount ?? buildResult.excerptCount} contextBytes=${buildResult.contextBytes}`
@@ -1369,12 +1505,29 @@ async function runCloudDraftFlow(options: CloudDraftFlowOptions): Promise<void> 
             cloudStatus: 'accepted',
             postAccepted: true,
             alreadyHandled: Boolean(options.automatic),
-            cooldownActive: Boolean(options.automatic),
+            gateAllowed: options.automatic ? automaticDecision?.decision.allowed ?? null : null,
+            gateScore: automaticDecision?.decision.score ?? null,
+            cooldownActive: false,
+            qaMode,
+            cooldownChecked: automaticDecision?.decision.cooldownChecked ?? false,
+            cooldownBlocked: automaticDecision?.decision.cooldownBlocked ?? false,
+            cooldownBypassed: automaticDecision?.decision.cooldownBypassed ?? false,
+            highSignalBypassUsed: automaticDecision?.decision.highSignalBypassUsed ?? false,
+            qaBypassUsed: automaticDecision?.decision.qaBypassUsed ?? false,
+            failureBackoffApplied: false,
+            postReadyPromptChoice: null,
+            draftReviewChoice: null,
             skipReason: null,
         });
 
         if (options.automatic) {
             const selection = await showPostReadyPrompt(true);
+            await postDecisionState?.upsert({
+                eventId,
+                triggerType: options.triggerType,
+                automatic: true,
+                postReadyPromptChoice: normalizePostReadyPromptChoice(selection),
+            });
             if (selection === 'pause') {
                 await setDevGhostPaused(true);
                 void Promise.resolve(vscode.window.showInformationMessage('Suggestions paused.')).catch(() => undefined);
@@ -1386,6 +1539,12 @@ async function runCloudDraftFlow(options: CloudDraftFlowOptions): Promise<void> 
             }
         } else {
             const selection = await showPostReadyPrompt(false);
+            await postDecisionState?.upsert({
+                eventId,
+                triggerType: options.triggerType,
+                automatic: false,
+                postReadyPromptChoice: normalizePostReadyPromptChoice(selection),
+            });
             if (selection !== 'review') {
                 return;
             }
@@ -1394,6 +1553,12 @@ async function runCloudDraftFlow(options: CloudDraftFlowOptions): Promise<void> 
         await showDraftReview(draftResponse.draftText, {
             onOpen: options.onOpen,
             onFeedback: async (feedback) => {
+                await postDecisionState?.upsert({
+                    eventId,
+                    triggerType: options.triggerType,
+                    automatic: Boolean(options.automatic),
+                    draftReviewChoice: normalizeDraftReviewChoice(feedback.feedbackType),
+                });
                 try {
                     await cloudClient.postFeedback({
                         deviceId,
@@ -1420,41 +1585,21 @@ async function runCloudDraftFlow(options: CloudDraftFlowOptions): Promise<void> 
         const providerFailureReason = cloudErrorCode === 'PROVIDER_ERROR' && isCloudClientError(error) && typeof error.details?.reason === 'string'
             ? error.details.reason
             : null;
-        const skipReason = providerFailureReason
-            ? normalizeCloudSkipReason(providerFailureReason)
-            : cloudErrorCode === 'QUOTA_EXCEEDED'
-                ? 'quota_exhausted'
-                : cloudErrorCode === 'PROVIDER_RATE_LIMITED'
-                    ? 'cloud_rate_limited'
-                    : cloudErrorCode === 'UPSTREAM_TIMEOUT'
-                        ? 'cloud_timeout'
-                    : cloudErrorCode === 'REQUEST_ABORTED'
-                            ? 'request_aborted'
-                            : 'cloud_failed';
+        const skipReason = normalizeCloudSkipReason(cloudErrorCode, providerFailureReason);
+        const blocker = normalizeCloudBlocker(skipReason);
+        const cloudStatus = skipReason === 'quota_exhausted'
+            ? 'quota_exhausted'
+            : skipReason === 'provider_timeout' || skipReason === 'provider_rate_limited' || skipReason === 'request_aborted' || skipReason === 'cloud_failed'
+                ? 'failed'
+                : 'rejected';
 
         await postDecisionState?.upsert({
             eventId,
             triggerType: options.triggerType,
             automatic: Boolean(options.automatic),
-            blocker: providerFailureReason === 'max_tokens'
-                ? 'max_tokens'
-                : providerFailureReason
-                    ? 'cloud_invalid_post_shape'
-                : skipReason === 'quota_exhausted'
-                    ? 'quota_exhausted'
-                    : skipReason === 'cloud_rate_limited'
-                        ? 'cloud_rate_limited'
-                        : skipReason === 'cloud_timeout'
-                            ? 'cloud_timeout'
-                            : skipReason === 'request_aborted'
-                                ? 'request_aborted'
-                                : 'cloud_failed',
+            blocker,
             skipReason,
-            cloudStatus: cloudErrorCode === 'QUOTA_EXCEEDED'
-                ? 'quota_exhausted'
-                : providerFailureReason
-                    ? 'rejected'
-                    : 'failed',
+            cloudStatus,
             postAccepted: false,
         });
         if (options.automatic) {
