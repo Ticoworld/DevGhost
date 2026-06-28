@@ -575,7 +575,7 @@ function buildContextBytes(request: DraftRequest): number {
 }
 
 export async function buildCloudDraftRequest(input: CloudDraftBuildInput): Promise<CloudDraftBuildResult> {
-    const commitEvidence = input.triggerType === 'COMMIT_DETECTED' ? input.triggerEvidence : undefined;
+    const commitEvidence = input.triggerEvidence;
     const hasCommitEvidence = !!commitEvidence;
     const changedPaths = hasCommitEvidence
         ? toSafeRelativePaths(input.workspaceRoot, commitEvidence?.changedRelativePaths ?? [])

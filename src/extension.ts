@@ -7,11 +7,12 @@ import { KeyManager, GeminiService } from './analyzer';
 import { scanProjectEnvironment } from './analyzer/projectScanner';
 import { CloudClient } from './cloud/cloudClient';
 import { buildCloudDraftRequest, buildCommitEvidence, type CloudDraftBuildResult } from './cloud/contextBuilder';
-import { formatCloudErrorMessage } from './cloud/errors';
+import { formatCloudErrorMessage, isCloudClientError } from './cloud/errors';
 import { getOrCreateCloudDeviceId } from './cloud/deviceId';
 import { CloudQuotaState } from './cloud/quotaState';
 import { CloudRepetitionMemory, type RepetitionSnapshot } from './cloud/repetitionMemory';
-import type { CommitEvidence, DismissReason, FeedbackType, QuotaSnapshot, TriggerType } from './cloud/contracts';
+import { FREE_DRAFT_LIMIT, type CommitEvidence, type DismissReason, type FeedbackType, type QuotaSnapshot, type TriggerType } from './cloud/contracts';
+import { buildPostDecisionSummary, PostDecisionState, type PostDecisionBlocker, type PostDecisionQuotaMode, type PostDecisionSkipReason } from './cloud/postDecisionState';
 
 /**
  * DevGhost 2.0 - Session-Based "Build in Public" Automation
@@ -42,9 +43,10 @@ let keyManager: KeyManager | undefined;
 let geminiService: GeminiService | undefined;
 let cloudQuotaState: CloudQuotaState | undefined;
 let cloudRepetitionMemory: CloudRepetitionMemory | undefined;
+let postDecisionState: PostDecisionState | undefined;
 let workspaceState: vscode.Memento | undefined;
 let extensionContextRef: vscode.ExtensionContext | undefined;
-let lastAutomaticDraftDecision: { eventKey: string; decision: AutomaticDraftDecision } | null = null;
+let lastAutomaticDraftDecision: { eventKey: string; eventId: string; decision: AutomaticDraftDecision } | null = null;
 
 // Phase 8: Agentic Intelligence
 import { AgenticBrain, type BrainResult } from './agent/AgenticBrain';
@@ -133,6 +135,83 @@ async function snoozeAutoDraftPrompts(): Promise<void> {
         snoozedUntil: Date.now() + AUTO_DRAFT_SNOOZE_MS,
         handledEventKeys: state.handledEventKeys.slice(-AUTO_DRAFT_HANDLED_LIMIT),
     }));
+}
+
+function isTruthyEnv(value: string | undefined): boolean {
+    return !!value && /^(1|true|yes|on)$/i.test(value.trim());
+}
+
+function detectQuotaMode(quota?: QuotaSnapshot | null): PostDecisionQuotaMode {
+    if (quota && quota.limit > FREE_DRAFT_LIMIT) {
+        return 'qa';
+    }
+
+    if (isTruthyEnv(process.env.DEVGHOST_QA_NO_QUOTA)) {
+        return 'qa';
+    }
+
+    const configuredLimit = process.env.DEVGHOST_FREE_DAILY_LIMIT?.trim();
+    if (configuredLimit) {
+        const parsed = Number(configuredLimit);
+        if (Number.isInteger(parsed) && parsed > FREE_DRAFT_LIMIT) {
+            return 'qa';
+        }
+    }
+
+    return 'normal';
+}
+
+function normalizeAutomaticGateBlocker(blockers: string[] | undefined): PostDecisionBlocker {
+    const joined = (blockers ?? []).join(' ').toLowerCase();
+    if (!joined) {
+        return 'below_threshold';
+    }
+    if (joined.includes('pause') || joined.includes('paused')) {
+        return 'paused';
+    }
+    if (joined.includes('not enough focus or session context')) {
+        return 'not_enough_context';
+    }
+    if (joined.includes('auto draft cooldown active')) {
+        return 'cooldown_active';
+    }
+    if (joined.includes('only generated, lock, or build output files changed')) {
+        return 'noise_only';
+    }
+    if (joined.includes('recent burst is not stable yet')) {
+        return 'burst_unstable';
+    }
+    if (joined.includes('score ') && joined.includes('below threshold')) {
+        return 'below_threshold';
+    }
+    return 'below_threshold';
+}
+
+function normalizeCloudSkipReason(code: string | null): PostDecisionSkipReason {
+    if (!code) {
+        return 'cloud_failed';
+    }
+
+    if (/^invalid_post_shape_/i.test(code)) {
+        return code as PostDecisionSkipReason;
+    }
+
+    switch (code) {
+        case 'quota_exhausted':
+            return 'quota_exhausted';
+        case 'cloud_rate_limited':
+            return 'cloud_rate_limited';
+        case 'cloud_timeout':
+            return 'cloud_timeout';
+        case 'request_aborted':
+            return 'request_aborted';
+        case 'cloud_invalid_post_shape':
+            return 'cloud_invalid_post_shape';
+        case 'cloud_failed':
+        case 'cloud_provider_error':
+        default:
+            return 'cloud_failed';
+    }
 }
 
 function logStatus(message: string): void {
@@ -239,16 +318,19 @@ function canDraftPostOrWarn(isManual?: boolean): boolean {
     return ok;
 }
 
-function rememberAutomaticDraftDecision(eventKey: string, decision: AutomaticDraftDecision): void {
-    lastAutomaticDraftDecision = { eventKey, decision };
+function rememberAutomaticDraftDecision(eventKey: string, eventId: string, decision: AutomaticDraftDecision): void {
+    lastAutomaticDraftDecision = { eventKey, eventId, decision };
 }
 
-function consumeAutomaticDraftDecision(eventKey: string): AutomaticDraftDecision | null {
+function consumeAutomaticDraftDecision(eventKey: string): { eventId: string; decision: AutomaticDraftDecision } | null {
     if (lastAutomaticDraftDecision?.eventKey !== eventKey) {
         return null;
     }
 
-    const decision = lastAutomaticDraftDecision.decision;
+    const decision = {
+        eventId: lastAutomaticDraftDecision.eventId,
+        decision: lastAutomaticDraftDecision.decision,
+    };
     lastAutomaticDraftDecision = null;
     return decision;
 }
@@ -661,9 +743,11 @@ type CloudDraftFlowOptions = {
     automatic?: boolean;
     triggerType: TriggerType;
     eventKey?: string;
+    eventId?: string;
     label: string;
     hints?: AutomaticDraftGateOptions['hints'];
     triggerEvidence?: CommitEvidence;
+    commitHashShort?: string | null;
     onOpen?: () => Promise<void> | void;
     onFeedback?: (feedback: DraftReviewFeedback) => Promise<void> | void;
 };
@@ -709,6 +793,7 @@ function formatDraftFailurePopupMessage(failure: DraftFlowFailure): string {
 type AutomaticDraftGateOptions = {
     trigger: 'PROJECT_LAUNCH' | 'PROJECT_RESUME' | 'FRICTION_BREAKTHROUGH' | 'DEEP_WORK_WRAP_UP' | 'WARMUP_RETURN' | 'SILENCE_BREAKER' | 'COMMIT_DETECTED' | 'FOCUS_INTENT';
     eventKey: string;
+    eventId?: string;
     label: string;
     hints?: {
         recentCommits?: string[];
@@ -750,19 +835,70 @@ function isFreshCommitForSession(commitAnalysis: CommitAnalysis): boolean {
 }
 
 async function allowAutomaticDraft(options: AutomaticDraftGateOptions): Promise<boolean> {
+    const eventId = options.eventId || randomUUID();
+    const commitAnalysis = options.hints?.commitAnalysis;
+    const nowIso = new Date().toISOString();
+    const baseRecord = {
+        eventId,
+        triggerType: options.trigger,
+        automatic: true,
+        commitDetected: options.trigger === 'COMMIT_DETECTED',
+        commitHashShort: commitAnalysis?.hash ?? null,
+        gateAllowed: null,
+        gateScore: null,
+        blocker: null,
+        quotaMode: detectQuotaMode(),
+        quotaRemaining: null,
+        cooldownActive: false,
+        alreadyHandled: false,
+        baselineSuppressed: false,
+        focusPresent: Boolean((contextManager?.getConfig()?.currentFocus || '').trim()),
+        projectSummaryPresent: Boolean(contextManager?.hasBaselineSummary()),
+        changedFileCount: commitAnalysis?.filesChanged ?? 0,
+        additions: commitAnalysis?.additions ?? null,
+        deletions: commitAnalysis?.deletions ?? null,
+        diffExcerptCount: null,
+        requestSent: false,
+        cloudStatus: 'not_sent' as const,
+        postAccepted: false,
+        skipReason: null,
+        timestampUtc: nowIso,
+    };
+
     if (isDevGhostPaused()) {
         logDebug(`Auto draft skipped (${options.label}): DevGhost is paused.`);
+        await postDecisionState?.upsert({
+            ...baseRecord,
+            gateAllowed: false,
+            blocker: 'paused',
+            skipReason: 'paused',
+        });
         return false;
     }
 
     if (options.trigger === 'COMMIT_DETECTED' && options.hints?.commitAnalysis && !isFreshCommitForSession(options.hints.commitAnalysis)) {
         logDebug(`Auto draft skipped (${options.label}): Existing commit ${options.hints.commitAnalysis.hash} predates this DevGhost session.`);
+        await postDecisionState?.upsert({
+            ...baseRecord,
+            baselineSuppressed: true,
+            gateAllowed: false,
+            blocker: 'baseline_suppressed',
+            skipReason: 'baseline_suppressed',
+            commitDetected: true,
+            commitHashShort: options.hints.commitAnalysis.hash,
+        });
         return false;
     }
 
     const tracker = workSignalManager;
     if (!tracker) {
         logDebug(`Auto draft skipped (${options.label}): local signal tracker is unavailable.`);
+        await postDecisionState?.upsert({
+            ...baseRecord,
+            gateAllowed: false,
+            blocker: 'not_ready',
+            skipReason: 'not_ready',
+        });
         return false;
     }
 
@@ -783,14 +919,30 @@ async function allowAutomaticDraft(options: AutomaticDraftGateOptions): Promise<
         canPostToday: true,
         hints: options.hints,
     });
-    rememberAutomaticDraftDecision(options.eventKey, decision);
+    rememberAutomaticDraftDecision(options.eventKey, eventId, decision);
 
     if (!decision.allowed) {
         logDebug(`Auto draft skipped (${options.label}): ${decision.score}/${decision.threshold} | ${decision.blockers.join('; ')}`);
+        await postDecisionState?.upsert({
+            ...baseRecord,
+            gateAllowed: false,
+            gateScore: decision.score,
+            blocker: normalizeAutomaticGateBlocker(decision.blockers),
+            cooldownActive: decision.blockers.some((blocker) => /cooldown active/i.test(blocker)),
+            skipReason: normalizeAutomaticGateBlocker(decision.blockers),
+        });
         return false;
     }
 
     logDebug(`Auto draft score ${decision.score}/${decision.threshold} (${options.label}): ${decision.reasons.join('; ')}`);
+    await postDecisionState?.upsert({
+        ...baseRecord,
+        gateAllowed: true,
+        gateScore: decision.score,
+        blocker: null,
+        cooldownActive: decision.blockers.some((blocker) => /cooldown active/i.test(blocker)),
+        skipReason: null,
+    });
     return true;
 }
 
@@ -966,20 +1118,65 @@ async function maybePromptForFocusBeforeCloudDraft(): Promise<void> {
 }
 
 async function runCloudDraftFlow(options: CloudDraftFlowOptions): Promise<void> {
+    const autoEventKey = options.eventKey || options.label;
+    const automaticDecision = options.automatic ? consumeAutomaticDraftDecision(autoEventKey) : null;
+    const eventId = options.eventId || automaticDecision?.eventId || randomUUID();
+    const nowIso = new Date().toISOString();
+    const commitDetected = Boolean(options.commitHashShort || options.triggerEvidence || options.triggerType === 'COMMIT_DETECTED');
+    const currentFocus = contextManager?.getConfig()?.currentFocus?.trim() || '';
+    const currentProjectSummaryPresent = Boolean(contextManager?.hasBaselineSummary());
+    await postDecisionState?.upsert({
+        eventId,
+        triggerType: options.triggerType,
+        automatic: Boolean(options.automatic),
+        commitDetected,
+        commitHashShort: options.commitHashShort ?? null,
+        gateAllowed: options.automatic ? automaticDecision?.decision.allowed ?? true : null,
+        gateScore: automaticDecision?.decision.score ?? null,
+        blocker: null,
+        quotaMode: detectQuotaMode(),
+        quotaRemaining: null,
+        cooldownActive: false,
+        alreadyHandled: false,
+        baselineSuppressed: false,
+        focusPresent: Boolean(currentFocus),
+        projectSummaryPresent: currentProjectSummaryPresent,
+        changedFileCount: options.triggerEvidence?.changedFileCount ?? 0,
+        additions: options.triggerEvidence?.additions ?? null,
+        deletions: options.triggerEvidence?.deletions ?? null,
+        diffExcerptCount: options.triggerEvidence?.diffExcerptCount ?? null,
+        requestSent: false,
+        cloudStatus: 'not_sent',
+        postAccepted: false,
+        skipReason: null,
+        timestampUtc: nowIso,
+    });
+
     if (options.automatic) {
-        const eventKey = options.eventKey || options.label;
-        const suppressionReason = getAutoDraftSuppressionReason(eventKey);
+        const suppressionReason = getAutoDraftSuppressionReason(autoEventKey);
         if (suppressionReason) {
             logDebug(
                 suppressionReason === 'snoozed'
                     ? `Auto cloud draft skipped (${options.label}): snooze is active.`
                     : `Auto cloud draft skipped (${options.label}): event already handled.`
             );
+            await postDecisionState?.upsert({
+                eventId,
+                triggerType: options.triggerType,
+                automatic: true,
+                alreadyHandled: suppressionReason === 'handled',
+                cooldownActive: false,
+                blocker: suppressionReason === 'snoozed' ? 'snoozed' : 'already_handled',
+                skipReason: suppressionReason === 'snoozed' ? 'snoozed' : 'already_handled',
+                cloudStatus: 'not_sent',
+                requestSent: false,
+                postAccepted: false,
+            });
             return;
         }
 
-        await markAutoDraftHandled(eventKey);
-        workSignalManager?.recordAutomaticSuggestion(eventKey);
+        await markAutoDraftHandled(autoEventKey);
+        workSignalManager?.recordAutomaticSuggestion(autoEventKey);
     }
 
     const extensionContext = extensionContextRef;
@@ -987,6 +1184,16 @@ async function runCloudDraftFlow(options: CloudDraftFlowOptions): Promise<void> 
         if (!options.automatic) {
             vscode.window.showErrorMessage('DevGhost: Post generation is not ready.');
         }
+        await postDecisionState?.upsert({
+            eventId,
+            triggerType: options.triggerType,
+            automatic: Boolean(options.automatic),
+            blocker: 'not_ready',
+            skipReason: 'not_ready',
+            cloudStatus: 'not_sent',
+            requestSent: false,
+            postAccepted: false,
+        });
         return;
     }
 
@@ -1012,6 +1219,16 @@ async function runCloudDraftFlow(options: CloudDraftFlowOptions): Promise<void> 
         if (!options.automatic) {
             vscode.window.showWarningMessage('DevGhost: Open a workspace first.');
         }
+        await postDecisionState?.upsert({
+            eventId,
+            triggerType: options.triggerType,
+            automatic: Boolean(options.automatic),
+            blocker: 'workspace_missing',
+            skipReason: 'workspace_missing',
+            cloudStatus: 'not_sent',
+            requestSent: false,
+            postAccepted: false,
+        });
         return;
     }
 
@@ -1022,7 +1239,27 @@ async function runCloudDraftFlow(options: CloudDraftFlowOptions): Promise<void> 
         });
 
         await cloudQuotaState?.setCachedQuota(deviceId, quotaResponse.quota);
+        const quotaMode = detectQuotaMode(quotaResponse.quota);
+        await postDecisionState?.upsert({
+            eventId,
+            triggerType: options.triggerType,
+            automatic: Boolean(options.automatic),
+            quotaMode,
+            quotaRemaining: quotaResponse.quota.remaining,
+        });
         if (!quotaResponse.quota.canGenerate) {
+            await postDecisionState?.upsert({
+                eventId,
+                triggerType: options.triggerType,
+                automatic: Boolean(options.automatic),
+                quotaMode,
+                quotaRemaining: quotaResponse.quota.remaining,
+                blocker: 'quota_exhausted',
+                skipReason: 'quota_exhausted',
+                cloudStatus: 'quota_exhausted',
+                requestSent: false,
+                postAccepted: false,
+            });
             await showQuotaLimitReachedNotice(deviceId, quotaResponse.quota, options.automatic);
             return;
         }
@@ -1046,14 +1283,48 @@ async function runCloudDraftFlow(options: CloudDraftFlowOptions): Promise<void> 
         });
 
         const commitEvidence = buildResult.request.commitEvidence;
+        await postDecisionState?.upsert({
+            eventId,
+            triggerType: options.triggerType,
+            automatic: Boolean(options.automatic),
+            commitDetected: Boolean(commitEvidence),
+            commitHashShort: options.commitHashShort ?? null,
+            quotaMode: detectQuotaMode(quotaResponse.quota),
+            quotaRemaining: quotaResponse.quota.remaining,
+            focusPresent: Boolean(buildResult.request.currentFocus?.trim()),
+            projectSummaryPresent: Boolean(buildResult.request.projectSummary?.trim()),
+            changedFileCount: commitEvidence?.changedFileCount ?? buildResult.changedRelativePathsCount,
+            additions: commitEvidence?.additions ?? null,
+            deletions: commitEvidence?.deletions ?? null,
+            diffExcerptCount: commitEvidence?.diffExcerptCount ?? buildResult.excerptCount,
+        });
         logDebug(
             `Cloud request metadata: triggerType=${options.triggerType} hasFocus=${Boolean(buildResult.request.currentFocus?.trim())} hasProjectSummary=${Boolean(buildResult.request.projectSummary?.trim())} changedFileCount=${commitEvidence?.changedFileCount ?? buildResult.changedRelativePathsCount} additions=${commitEvidence?.additions ?? 0} deletions=${commitEvidence?.deletions ?? 0} diffExcerptCount=${commitEvidence?.diffExcerptCount ?? buildResult.excerptCount} contextBytes=${buildResult.contextBytes}`
         );
+
+        await postDecisionState?.upsert({
+            eventId,
+            triggerType: options.triggerType,
+            automatic: Boolean(options.automatic),
+            requestSent: true,
+            cloudStatus: 'sent',
+        });
 
         const draftResponse = await cloudClient.postDraft(buildResult.request);
 
         await cloudQuotaState?.setCachedQuota(deviceId, draftResponse.quota);
         await cloudRepetitionMemory?.recordDraft(draftResponse.topicTag, draftResponse.angle);
+        await postDecisionState?.upsert({
+            eventId,
+            triggerType: options.triggerType,
+            automatic: Boolean(options.automatic),
+            quotaMode: detectQuotaMode(draftResponse.quota),
+            quotaRemaining: draftResponse.quota.remaining,
+            requestSent: true,
+            cloudStatus: 'accepted',
+            postAccepted: true,
+            skipReason: null,
+        });
 
         if (options.automatic) {
             const selection = await showPostReadyPrompt(true);
@@ -1098,6 +1369,45 @@ async function runCloudDraftFlow(options: CloudDraftFlowOptions): Promise<void> 
         });
     } catch (error) {
         const message = formatCloudErrorMessage(error);
+        const cloudErrorCode = isCloudClientError(error) ? error.code : null;
+        const invalidPostShapeReason = cloudErrorCode === 'PROVIDER_ERROR' && isCloudClientError(error) && typeof error.details?.reason === 'string'
+            ? error.details.reason
+            : null;
+        const skipReason = invalidPostShapeReason
+            ? normalizeCloudSkipReason(invalidPostShapeReason)
+            : cloudErrorCode === 'QUOTA_EXCEEDED'
+                ? 'quota_exhausted'
+                : cloudErrorCode === 'PROVIDER_RATE_LIMITED'
+                    ? 'cloud_rate_limited'
+                    : cloudErrorCode === 'UPSTREAM_TIMEOUT'
+                        ? 'cloud_timeout'
+                    : cloudErrorCode === 'REQUEST_ABORTED'
+                            ? 'request_aborted'
+                            : 'cloud_failed';
+
+        await postDecisionState?.upsert({
+            eventId,
+            triggerType: options.triggerType,
+            automatic: Boolean(options.automatic),
+            blocker: invalidPostShapeReason
+                ? 'cloud_invalid_post_shape'
+                : skipReason === 'quota_exhausted'
+                    ? 'quota_exhausted'
+                    : skipReason === 'cloud_rate_limited'
+                        ? 'cloud_rate_limited'
+                        : skipReason === 'cloud_timeout'
+                            ? 'cloud_timeout'
+                            : skipReason === 'request_aborted'
+                                ? 'request_aborted'
+                                : 'cloud_failed',
+            skipReason,
+            cloudStatus: cloudErrorCode === 'QUOTA_EXCEEDED'
+                ? 'quota_exhausted'
+                : invalidPostShapeReason
+                    ? 'rejected'
+                    : 'failed',
+            postAccepted: false,
+        });
         if (!options.automatic) {
             logError(`Post generation failed: ${message}`);
             vscode.window.showErrorMessage(`DevGhost: ${message}`);
@@ -1201,9 +1511,20 @@ async function runDraftFlow(options: DraftFlowOptions): Promise<void> {
 async function runCloudDraftCommand(extensionContext: vscode.ExtensionContext): Promise<void> {
     noteManualActionWhilePaused();
     extensionContextRef = extensionContext;
+    const workspaceRoot = resolveWorkspaceRoot() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+    const manualCommitAnalysis = workspaceRoot ? await gitManager?.getCurrentHeadAnalysis() : null;
+    const manualTriggerEvidence = manualCommitAnalysis
+        ? buildCommitEvidence({
+            workspaceRoot,
+            commitAnalysis: manualCommitAnalysis,
+        })
+        : undefined;
     await runCloudDraftFlow({
         triggerType: 'MANUAL_INTENT',
         label: 'Cloud draft',
+        eventId: randomUUID(),
+        triggerEvidence: manualTriggerEvidence,
+        commitHashShort: manualCommitAnalysis?.hash ?? null,
     });
 }
 
@@ -1258,6 +1579,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     workspaceState = context.workspaceState;
     cloudQuotaState = new CloudQuotaState(context.globalState);
     cloudRepetitionMemory = new CloudRepetitionMemory(context.workspaceState);
+    postDecisionState = new PostDecisionState(context.workspaceState);
     workSignalManager = new WorkSignalManager(context.workspaceState, outputChannel);
     workSignalManager.recordFocus(contextManager.getConfig()?.currentFocus || '');
     workSignalManager.recordActiveFile(vscode.window.activeTextEditor?.document ?? null);
@@ -1275,13 +1597,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     // Initialize the Git Manager (The Historian)
     gitManager = new GitManager(outputChannel, context.workspaceState, sessionManager.getSession().startTime);
-    gitManager.initialize();
-    context.subscriptions.push(gitManager);
-
-    // Record commits for history/silence tracking (no automatic AI drafting on commit)
     gitManager.onCommit((analysis) => {
         handleCommitDetected(analysis);
     });
+    await gitManager.initialize();
+    context.subscriptions.push(gitManager);
 
     const activeEditorListener = vscode.window.onDidChangeActiveTextEditor((editor) => {
         if (editor) {
@@ -1330,7 +1650,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     historyManager.onWarmup(async (summary, lastEvents) => {
         handleWarmup(summary, lastEvents);
     });
-    historyManager.initialize();
+    await historyManager.initialize();
     context.subscriptions.push(historyManager);
 
     // Phase 8: Initialize draft engine before handshake so we can run PROJECT_LAUNCH / PROJECT_RESUME
@@ -1462,6 +1782,17 @@ function registerCommands(context: vscode.ExtensionContext): void {
     });
     context.subscriptions.push(showLogsCommand);
 
+    const showLastPostDecisionCommand = vscode.commands.registerCommand('devghost.showLastPostDecision', async () => {
+        const summaryLines = buildPostDecisionSummary(postDecisionState?.getLatest() ?? null);
+        outputChannel?.appendLine('Last post decision summary:');
+        for (const line of summaryLines) {
+            outputChannel?.appendLine(line);
+        }
+        outputChannel?.show(true);
+        await Promise.resolve(vscode.window.showInformationMessage(summaryLines[0] ?? 'No post decision recorded.'));
+    });
+    context.subscriptions.push(showLastPostDecisionCommand);
+
     // Command: Privacy & data use
     const privacyCommand = vscode.commands.registerCommand('devghost.privacy', async () => {
         await showPrivacyAndDataUse();
@@ -1529,6 +1860,7 @@ function registerCommands(context: vscode.ExtensionContext): void {
 
         sessionManager?.resetTracking();
         workSignalManager?.resetLocalSignals();
+        await postDecisionState?.clear();
         await updateAutoDraftState(() => ({
             snoozedUntil: 0,
             handledEventKeys: [],
@@ -1913,17 +2245,19 @@ async function handleCommitDetected(analysis: CommitAnalysis): Promise<void> {
     const triggerEvidence = buildCommitEvidence({
         workspaceRoot: analysis.repoRoot,
         commitAnalysis: analysis,
-        signalReasons: scoreDecision?.reasons,
-        gateReasons: scoreDecision?.blockers,
+        signalReasons: scoreDecision?.decision.reasons,
+        gateReasons: scoreDecision?.decision.blockers,
     });
 
     await runCloudDraftFlow({
         automatic: true,
         triggerType: 'COMMIT_DETECTED',
         eventKey,
+        eventId: scoreDecision?.eventId,
         label: 'Commit draft',
         hints: { commitAnalysis: analysis },
         triggerEvidence,
+        commitHashShort: analysis.hash,
     });
 }
 

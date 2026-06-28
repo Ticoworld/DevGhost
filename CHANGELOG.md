@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.4.4 - QA reliability build
+
+- Automatic Cloud draft attempts now leave a metadata-only decision record that can be inspected from the extension.
+- A new `Show Last Post Decision` command surfaces the latest skip or accept summary for QA.
+- Git startup ordering was tightened so commit callbacks are wired before the Git watcher can settle.
+- Manual Cloud drafts now include the latest HEAD commit evidence when it exists.
+- Cloud now rejects short headline-only posts more aggressively and retries once with stricter instructions.
+- Cloud quota can be put into a QA-friendly high-limit mode through backend configuration.
+
 ## 3.4.3 - Quota and post-shape hardening
 
 - Automatic post suggestions now show a calm quota notice once per rolling window instead of going silent.

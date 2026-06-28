@@ -7,6 +7,7 @@ export type DraftShapeInvalidReason =
     | 'identifier_only'
     | 'punctuation_heavy'
     | 'generic_commit_filler'
+    | 'headline_only'
     | 'unmatched_backtick'
     | 'code_span_terminal'
     | 'cut_off_fragment';
@@ -33,9 +34,6 @@ const FRAGMENT_PRECEDING_WORDS = new Set([
     'around',
     'about',
     'of',
-    'the',
-    'a',
-    'an',
     'in',
     'on',
     'at',
@@ -57,6 +55,51 @@ const TAIL_FRAGMENT_PRECEDING_WORDS = new Set([
     'at',
     'by',
     'via',
+]);
+
+const HEADLINE_STOP_WORDS = new Set([
+    'a',
+    'an',
+    'and',
+    'are',
+    'around',
+    'at',
+    'be',
+    'been',
+    'being',
+    'by',
+    'for',
+    'from',
+    'in',
+    'into',
+    'is',
+    'it',
+    'its',
+    'just',
+    'of',
+    'on',
+    'or',
+    'our',
+    'out',
+    'so',
+    'that',
+    'the',
+    'their',
+    'them',
+    'there',
+    'these',
+    'this',
+    'those',
+    'to',
+    'too',
+    'up',
+    'via',
+    'was',
+    'we',
+    'were',
+    'with',
+    'you',
+    'your',
 ]);
 
 function stripWrappingDelimiters(text: string): string {
@@ -103,6 +146,14 @@ function splitDraftTokens(text: string): string[] {
 
 function countAlphabeticChars(value: string): number {
     return (value.match(/[A-Za-z]/g) ?? []).length;
+}
+
+function countContentWords(words: string[]): number {
+    return words
+        .map((word) => stripTrailingSentencePunctuation(word).toLowerCase())
+        .filter((word) => word.length > 0)
+        .filter((word) => !HEADLINE_STOP_WORDS.has(word))
+        .length;
 }
 
 function countPunctuationChars(value: string): number {
@@ -202,6 +253,36 @@ function looksLikeDanglingTail(text: string): boolean {
     return lastToken.length > 0 && lastToken.length <= 4;
 }
 
+function endsLikeHeading(text: string): boolean {
+    return /:\s*$/.test(text.trim());
+}
+
+function looksLikeHeadlineOnly(text: string): boolean {
+    const trimmed = text.trim();
+    if (!trimmed) {
+        return false;
+    }
+
+    if (endsLikeHeading(trimmed)) {
+        return true;
+    }
+
+    const words = splitDraftTokens(trimmed);
+    if (words.length === 0) {
+        return false;
+    }
+
+    if (words.length > 8 && trimmed.length > 60) {
+        return false;
+    }
+
+    if (!/[.!?]["')\]]?\s*$/.test(trimmed)) {
+        return true;
+    }
+
+    return countContentWords(words) < 4;
+}
+
 function looksCutOff(text: string): boolean {
     const trimmed = text.trim();
     if (!trimmed) {
@@ -215,9 +296,6 @@ function looksCutOff(text: string): boolean {
     const tokens = trimmed.split(/\s+/).filter(Boolean);
     if (tokens.length < 3) {
         return false;
-    }
-    if (tokens.length <= 4) {
-        return true;
     }
 
     const lastToken = tokens[tokens.length - 1] ?? '';
@@ -278,6 +356,9 @@ export function classifyDraftShapeFailure(value: string): DraftShapeInvalidReaso
     }
     if (looksCutOff(text)) {
         return 'cut_off_fragment';
+    }
+    if (looksLikeHeadlineOnly(text)) {
+        return 'headline_only';
     }
 
     const alphaChars = countAlphabeticChars(text);

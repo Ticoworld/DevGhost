@@ -20,15 +20,36 @@ type DraftQuotaRow = {
     oldest_created_at: string | null;
 };
 
+function isTruthyEnv(value: string | undefined): boolean {
+    return !!value && /^(1|true|yes|on)$/i.test(value.trim());
+}
+
+function getDraftLimit(): number {
+    if (isTruthyEnv(process.env.DEVGHOST_QA_NO_QUOTA)) {
+        return 999;
+    }
+
+    const configuredLimit = process.env.DEVGHOST_FREE_DAILY_LIMIT?.trim();
+    if (configuredLimit) {
+        const parsed = Number(configuredLimit);
+        if (Number.isInteger(parsed) && parsed > 0) {
+            return parsed;
+        }
+    }
+
+    return FREE_DRAFT_LIMIT;
+}
+
 function buildQuotaSnapshot(used: number, oldestCreatedAt: string | null): QuotaSnapshot {
-    const remaining = Math.max(FREE_DRAFT_LIMIT - used, 0);
+    const limit = getDraftLimit();
+    const remaining = Math.max(limit - used, 0);
     const windowStartUtc = new Date(Date.now() - ROLLING_QUOTA_WINDOW_MS).toISOString();
     const resetAtUtc = oldestCreatedAt
         ? new Date(new Date(oldestCreatedAt).getTime() + ROLLING_QUOTA_WINDOW_MS).toISOString()
         : new Date(Date.now() + ROLLING_QUOTA_WINDOW_MS).toISOString();
 
     return {
-        limit: FREE_DRAFT_LIMIT,
+        limit,
         used,
         remaining,
         windowStartUtc,
@@ -114,7 +135,7 @@ export async function recordSuccessfulDraft(params: RecordSuccessfulDraftParams)
         });
 
         const nextUsed = snapshot.used + 1;
-        const nextRemaining = Math.max(FREE_DRAFT_LIMIT - nextUsed, 0);
+        const nextRemaining = Math.max(getDraftLimit() - nextUsed, 0);
         return {
             draftId,
             quota: {

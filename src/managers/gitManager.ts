@@ -414,6 +414,19 @@ export class GitManager implements vscode.Disposable {
         this.onCommitCallback = callback;
     }
 
+    async getCurrentHeadAnalysis(): Promise<CommitAnalysis | null> {
+        if (!this.repository) {
+            return null;
+        }
+
+        const currentHead = this.repository.state.HEAD?.commit || null;
+        if (!currentHead) {
+            return null;
+        }
+
+        return this.analyzeCommit(currentHead);
+    }
+
     /**
      * Check if Git is available.
      */

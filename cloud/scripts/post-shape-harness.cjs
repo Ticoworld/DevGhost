@@ -108,11 +108,14 @@ async function main() {
         ['package.json', 'path_or_filename_only'],
         ['Updated src/app', 'path_or_filename_only'],
         ['Just shipped the operator', 'generic_commit_filler'],
+        ['Aligned our backup UI with reality:', 'headline_only'],
+        ['Just wired up repetition memory', 'headline_only'],
+        ['Tightened the handoff', 'headline_only'],
+        ['Updated the operator flow', 'headline_only'],
         ['Added an operator CLI to `ver`', 'code_span_terminal'],
         ['Added support for `operator`', 'code_span_terminal'],
         ['Added an operator CLI to ver.', 'cut_off_fragment'],
         ['Added an operator CLI to ver', 'cut_off_fragment'],
-        ['Tightened the review hand', 'cut_off_fragment'],
         ['I tightened the handoff logic for', 'cut_off_fragment'],
         [', 21 deletions).', 'cut_off_fragment'],
     ];
@@ -124,6 +127,8 @@ async function main() {
     assert.equal(classifyDraftShapeFailure('Updated `src/app`'), 'path_or_filename_only');
     assert.equal(classifyDraftShapeFailure('Refactored the `smart`'), 'code_span_terminal');
     assert.equal(classifyDraftShapeFailure('Added an operator CLI to ver.'), 'cut_off_fragment');
+    assert.equal(classifyDraftShapeFailure('Aligned our backup UI with reality:'), 'headline_only');
+    assert.equal(classifyDraftShapeFailure('Just wired up repetition memory'), 'headline_only');
 
     assert.equal(classifyDraftShapeFailure('Fixed the memo review flow.'), null);
     assert.equal(classifyDraftShapeFailure('Tightened the operator CLI output and added tests around the doctor/status path.'), null);

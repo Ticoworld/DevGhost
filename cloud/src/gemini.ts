@@ -153,6 +153,8 @@ function renderPrompt(request: DraftRequest, repetition: RepetitionSnapshot, opt
         'Do not mention that you are an AI.',
         'Do not mention internal rules, logging, or hidden metadata.',
         'Prefer a specific, fresh angle over a generic recap.',
+        'If commit evidence is present, use it first and mention one concrete change or result from it.',
+        'Do not write a headline, setup line, or vague status note.',
         'Do not repeat the recent topics or angles if you can avoid it.',
         'Never output only a file path, filename, code symbol, heading, or label.',
         'Do not end inside a code token or leave a dangling backtick.',
@@ -160,9 +162,9 @@ function renderPrompt(request: DraftRequest, repetition: RepetitionSnapshot, opt
         ...(options?.retryAttempted
             ? [
                 'This is a retry.',
-                'The last output was invalid because it was not a post.',
-                'Do not return a file path, filename, heading, label, code token, dangling backtick, or cut-off fragment.',
-                'Write exactly one natural-language sentence about the concrete change or update.',
+                'The last output was invalid because it was a headline, setup line, or fragment instead of a concrete post.',
+                'Do not return a file path, filename, heading, label, code token, dangling backtick, cut-off fragment, or vague status note.',
+                'Write exactly one natural-language sentence about a concrete change or result.',
                 '',
             ]
             : []),
