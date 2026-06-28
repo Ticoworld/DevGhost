@@ -78,6 +78,26 @@ function clip(value: string, maxChars: number): string {
     return value.length > maxChars ? value.slice(0, maxChars) : value;
 }
 
+function packDiffExcerpts(excerpts: DiffExcerpt[]): { excerpts: DiffExcerpt[]; excerptChars: number } {
+    const packed: DiffExcerpt[] = [];
+    let running = 0;
+
+    for (const excerpt of excerpts) {
+        const size = excerpt.path.length + excerpt.excerpt.length + (excerpt.label?.length ?? 0);
+        if (running + size > MAX_TOTAL_DIFF_EXCERPT_CHARS) {
+            continue;
+        }
+
+        packed.push(excerpt);
+        running += size;
+    }
+
+    return {
+        excerpts: packed,
+        excerptChars: running,
+    };
+}
+
 function sanitizeValue(value: string | undefined, maxChars: number, workspaceRoot?: string): string | undefined {
     if (!value) {
         return undefined;
@@ -501,22 +521,8 @@ export function buildCommitEvidence(input: CommitEvidenceBuildInput): CommitEvid
         }
     }
 
-    const selectedDiffExcerpts = [...selectedDiffExcerptsByPath.values()].slice(0, MAX_SELECTED_DIFF_EXCERPTS);
-    let diffExcerptChars = selectedDiffExcerpts.reduce((sum, excerpt) => sum + excerpt.path.length + excerpt.excerpt.length + (excerpt.label?.length ?? 0), 0);
-    if (diffExcerptChars > MAX_TOTAL_DIFF_EXCERPT_CHARS) {
-        const trimmed: DiffExcerpt[] = [];
-        let running = 0;
-        for (const excerpt of selectedDiffExcerpts) {
-            const size = excerpt.path.length + excerpt.excerpt.length + (excerpt.label?.length ?? 0);
-            if (running + size > MAX_TOTAL_DIFF_EXCERPT_CHARS) {
-                break;
-            }
-            trimmed.push(excerpt);
-            running += size;
-        }
-        diffExcerptChars = running;
-        selectedDiffExcerpts.splice(0, selectedDiffExcerpts.length, ...trimmed);
-    }
+    const selectedDiffExcerpts = packDiffExcerpts([...selectedDiffExcerptsByPath.values()].slice(0, MAX_SELECTED_DIFF_EXCERPTS));
+    const diffExcerptChars = selectedDiffExcerpts.excerptChars;
 
     const additions = Math.max(0, input.commitAnalysis.additions || 0);
     const deletions = Math.max(0, input.commitAnalysis.deletions || 0);
@@ -531,9 +537,9 @@ export function buildCommitEvidence(input: CommitEvidenceBuildInput): CommitEvid
         changedFileCount: Math.max(0, input.commitAnalysis.filesChanged || changedRelativePaths.length),
         signalReasons: normalizeReasons(input.signalReasons, input.workspaceRoot),
         gateReasons: normalizeReasons(input.gateReasons, input.workspaceRoot),
-        diffExcerptCount: selectedDiffExcerpts.length,
+        diffExcerptCount: selectedDiffExcerpts.excerpts.length,
         diffExcerptChars,
-        selectedDiffExcerpts,
+        selectedDiffExcerpts: selectedDiffExcerpts.excerpts,
     };
 }
 
@@ -582,7 +588,7 @@ export async function buildCloudDraftRequest(input: CloudDraftBuildInput): Promi
         : toSafeRelativePaths(input.workspaceRoot, parseChangedPathsFromGit(input.workspaceRoot));
 
     const selectedDiffExcerpts = hasCommitEvidence
-        ? [...(commitEvidence?.selectedDiffExcerpts ?? [])].slice(0, MAX_SELECTED_DIFF_EXCERPTS)
+        ? packDiffExcerpts([...(commitEvidence?.selectedDiffExcerpts ?? [])].slice(0, MAX_SELECTED_DIFF_EXCERPTS)).excerpts
         : (() => {
             const activeRelativePath = (() => {
                 const activeEditor = vscode.window.activeTextEditor;
@@ -606,27 +612,29 @@ export async function buildCloudDraftRequest(input: CloudDraftBuildInput): Promi
             return [...selectedDiffExcerptsByPath.values()].slice(0, MAX_SELECTED_DIFF_EXCERPTS);
         })();
 
-    let excerptChars = selectedDiffExcerpts.reduce((sum, excerpt) => sum + excerpt.path.length + excerpt.excerpt.length + (excerpt.label?.length ?? 0), 0);
-    if (excerptChars > MAX_TOTAL_DIFF_EXCERPT_CHARS) {
-        const trimmed: DiffExcerpt[] = [];
-        let running = 0;
-        for (const excerpt of selectedDiffExcerpts) {
-            const size = excerpt.path.length + excerpt.excerpt.length + (excerpt.label?.length ?? 0);
-            if (running + size > MAX_TOTAL_DIFF_EXCERPT_CHARS) {
-                break;
-            }
-            trimmed.push(excerpt);
-            running += size;
-        }
-        excerptChars = running;
-        selectedDiffExcerpts.splice(0, selectedDiffExcerpts.length, ...trimmed);
-    }
+    const packedSelectedDiffExcerpts = packDiffExcerpts(selectedDiffExcerpts);
+    const excerptChars = packedSelectedDiffExcerpts.excerptChars;
 
     const repetitionSnapshot = input.repetitionSnapshot ?? {
         recentTopicTags: [],
         recentAngles: [],
         phrasesToAvoid: [],
     };
+
+    const requestCommitEvidence = commitEvidence
+        ? {
+            commitMessage: sanitizeValue(commitEvidence.commitMessage, MAX_COMMIT_MESSAGE_CHARS, input.workspaceRoot),
+            changedRelativePaths: changedPaths,
+            additions: Math.max(0, commitEvidence.additions || 0),
+            deletions: Math.max(0, commitEvidence.deletions || 0),
+            workType: sanitizeValue(commitEvidence.workType, MAX_COMMIT_WORK_TYPE_CHARS, input.workspaceRoot),
+            changedFileCount: Math.max(0, commitEvidence.changedFileCount || changedPaths.length),
+            signalReasons: normalizeReasons(commitEvidence.signalReasons, input.workspaceRoot),
+            gateReasons: normalizeReasons(commitEvidence.gateReasons, input.workspaceRoot),
+            diffExcerptCount: packedSelectedDiffExcerpts.excerpts.length,
+            diffExcerptChars: excerptChars,
+        }
+        : undefined;
 
     const request: DraftRequest = {
         deviceId: input.deviceId,
@@ -647,7 +655,6 @@ export async function buildCloudDraftRequest(input: CloudDraftBuildInput): Promi
         failedCommandNames: collectFailedCommandNames(input.sessionManager),
         successfulCommandNames: collectSuccessfulCommandNames(input.workSignalManager),
         frictionSummary: buildFrictionSummary(input),
-        selectedDiffExcerpts,
         recentTopicTags: unique(repetitionSnapshot.recentTopicTags
             .map((value) => sanitizeValue(value, MAX_TOPIC_TAG_CHARS, input.workspaceRoot))
             .filter((value): value is string => Boolean(value)))
@@ -660,26 +667,15 @@ export async function buildCloudDraftRequest(input: CloudDraftBuildInput): Promi
             .map((value) => sanitizeValue(value, MAX_PHRASE_CHARS, input.workspaceRoot))
             .filter((value): value is string => Boolean(value)))
             .slice(0, MAX_PHRASES_TO_AVOID),
-        commitEvidence: commitEvidence ? {
-            commitMessage: sanitizeValue(commitEvidence.commitMessage, MAX_COMMIT_MESSAGE_CHARS, input.workspaceRoot),
-            changedRelativePaths: changedPaths,
-            additions: Math.max(0, commitEvidence.additions || 0),
-            deletions: Math.max(0, commitEvidence.deletions || 0),
-            workType: sanitizeValue(commitEvidence.workType, MAX_COMMIT_WORK_TYPE_CHARS, input.workspaceRoot),
-            changedFileCount: Math.max(0, commitEvidence.changedFileCount || changedPaths.length),
-            signalReasons: normalizeReasons(commitEvidence.signalReasons, input.workspaceRoot),
-            gateReasons: normalizeReasons(commitEvidence.gateReasons, input.workspaceRoot),
-            diffExcerptCount: selectedDiffExcerpts.length,
-            diffExcerptChars: excerptChars,
-            selectedDiffExcerpts,
-        } : undefined,
+        commitEvidence: requestCommitEvidence,
+        selectedDiffExcerpts: packedSelectedDiffExcerpts.excerpts,
     };
 
     const contextBytes = buildContextBytes(request);
     return {
         request,
         contextBytes,
-        excerptCount: selectedDiffExcerpts.length,
+        excerptCount: packedSelectedDiffExcerpts.excerpts.length,
         excerptChars,
         changedRelativePathsCount: changedPaths.length,
         activeSymbolsCount: request.activeSymbols?.length ?? 0,

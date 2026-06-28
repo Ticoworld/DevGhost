@@ -23,6 +23,8 @@ export type PostDecisionBlocker =
     | 'cloud_failed'
     | 'request_aborted'
     | 'snoozed'
+    | 'retry_backoff'
+    | 'max_tokens'
     | 'workspace_missing'
     | 'not_ready';
 

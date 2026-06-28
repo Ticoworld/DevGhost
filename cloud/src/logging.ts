@@ -8,6 +8,8 @@ export interface LogMeta {
     requestId?: string;
     deviceId?: string;
     triggerType?: TriggerType;
+    clientVersion?: string;
+    quotaMode?: string;
     status?: number;
     errorCode?: ApiErrorCode;
     durationMs?: number;
@@ -17,10 +19,13 @@ export interface LogMeta {
     excerptCount?: number;
     excerptChars?: number;
     modelName?: string;
+    finishReason?: string;
+    visibleOutputTokens?: number;
+    thoughtsTokenCount?: number;
     reason?: string;
+    invalidReason?: string;
     retryAttempted?: boolean;
     field?: string;
-    clientVersion?: string;
     feedbackType?: string;
 }
 

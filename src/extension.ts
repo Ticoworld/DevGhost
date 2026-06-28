@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { ContextManager, SessionManager, GitManager, HistoryManager, WorkSignalManager, CommitAnalysis, AutomaticDraftDecision } from './managers';
 import { KeyManager, GeminiService } from './analyzer';
 import { scanProjectEnvironment } from './analyzer/projectScanner';
@@ -47,6 +47,8 @@ let postDecisionState: PostDecisionState | undefined;
 let workspaceState: vscode.Memento | undefined;
 let extensionContextRef: vscode.ExtensionContext | undefined;
 let lastAutomaticDraftDecision: { eventKey: string; eventId: string; decision: AutomaticDraftDecision } | null = null;
+const AUTOMATIC_FAILURE_BACKOFF_MS = 2 * 60 * 1000;
+const recentAutomaticDraftFailures = new Map<string, number>();
 
 // Phase 8: Agentic Intelligence
 import { AgenticBrain, type BrainResult } from './agent/AgenticBrain';
@@ -130,6 +132,34 @@ async function markAutoDraftHandled(eventKey: string): Promise<void> {
     });
 }
 
+function buildOpaqueWorkspaceEventKey(prefix: string, workspaceRoot: string, suffix: string): string {
+    const normalizedRoot = (workspaceRoot || 'workspace').replace(/\\/g, '/').toLowerCase();
+    const workspaceHash = createHash('sha256').update(normalizedRoot).digest('hex').slice(0, 12);
+    return `${prefix}:${workspaceHash}:${suffix}`;
+}
+
+function recordAutomaticDraftFailure(eventKey: string): void {
+    recentAutomaticDraftFailures.set(eventKey, Date.now());
+}
+
+function clearAutomaticDraftFailure(eventKey: string): void {
+    recentAutomaticDraftFailures.delete(eventKey);
+}
+
+function isAutomaticDraftFailureBackoffActive(eventKey: string): boolean {
+    const lastFailureAt = recentAutomaticDraftFailures.get(eventKey);
+    if (typeof lastFailureAt !== 'number') {
+        return false;
+    }
+
+    if (Date.now() - lastFailureAt > AUTOMATIC_FAILURE_BACKOFF_MS) {
+        recentAutomaticDraftFailures.delete(eventKey);
+        return false;
+    }
+
+    return true;
+}
+
 async function snoozeAutoDraftPrompts(): Promise<void> {
     await updateAutoDraftState((state) => ({
         snoozedUntil: Date.now() + AUTO_DRAFT_SNOOZE_MS,
@@ -197,6 +227,8 @@ function normalizeCloudSkipReason(code: string | null): PostDecisionSkipReason {
     }
 
     switch (code) {
+        case 'max_tokens':
+            return 'max_tokens';
         case 'quota_exhausted':
             return 'quota_exhausted';
         case 'cloud_rate_limited':
@@ -865,6 +897,17 @@ async function allowAutomaticDraft(options: AutomaticDraftGateOptions): Promise<
         timestampUtc: nowIso,
     };
 
+    if (isAutomaticDraftFailureBackoffActive(options.eventKey)) {
+        logDebug(`Auto draft skipped (${options.label}): recent Cloud failure backoff is active.`);
+        await postDecisionState?.upsert({
+            ...baseRecord,
+            gateAllowed: false,
+            blocker: 'retry_backoff',
+            skipReason: 'retry_backoff',
+        });
+        return false;
+    }
+
     if (isDevGhostPaused()) {
         logDebug(`Auto draft skipped (${options.label}): DevGhost is paused.`);
         await postDecisionState?.upsert({
@@ -1174,9 +1217,6 @@ async function runCloudDraftFlow(options: CloudDraftFlowOptions): Promise<void> 
             });
             return;
         }
-
-        await markAutoDraftHandled(autoEventKey);
-        workSignalManager?.recordAutomaticSuggestion(autoEventKey);
     }
 
     const extensionContext = extensionContextRef;
@@ -1314,6 +1354,11 @@ async function runCloudDraftFlow(options: CloudDraftFlowOptions): Promise<void> 
 
         await cloudQuotaState?.setCachedQuota(deviceId, draftResponse.quota);
         await cloudRepetitionMemory?.recordDraft(draftResponse.topicTag, draftResponse.angle);
+        clearAutomaticDraftFailure(autoEventKey);
+        if (options.automatic) {
+            await markAutoDraftHandled(autoEventKey);
+            workSignalManager?.recordAutomaticSuggestion(autoEventKey);
+        }
         await postDecisionState?.upsert({
             eventId,
             triggerType: options.triggerType,
@@ -1323,6 +1368,8 @@ async function runCloudDraftFlow(options: CloudDraftFlowOptions): Promise<void> 
             requestSent: true,
             cloudStatus: 'accepted',
             postAccepted: true,
+            alreadyHandled: Boolean(options.automatic),
+            cooldownActive: Boolean(options.automatic),
             skipReason: null,
         });
 
@@ -1370,11 +1417,11 @@ async function runCloudDraftFlow(options: CloudDraftFlowOptions): Promise<void> 
     } catch (error) {
         const message = formatCloudErrorMessage(error);
         const cloudErrorCode = isCloudClientError(error) ? error.code : null;
-        const invalidPostShapeReason = cloudErrorCode === 'PROVIDER_ERROR' && isCloudClientError(error) && typeof error.details?.reason === 'string'
+        const providerFailureReason = cloudErrorCode === 'PROVIDER_ERROR' && isCloudClientError(error) && typeof error.details?.reason === 'string'
             ? error.details.reason
             : null;
-        const skipReason = invalidPostShapeReason
-            ? normalizeCloudSkipReason(invalidPostShapeReason)
+        const skipReason = providerFailureReason
+            ? normalizeCloudSkipReason(providerFailureReason)
             : cloudErrorCode === 'QUOTA_EXCEEDED'
                 ? 'quota_exhausted'
                 : cloudErrorCode === 'PROVIDER_RATE_LIMITED'
@@ -1389,8 +1436,10 @@ async function runCloudDraftFlow(options: CloudDraftFlowOptions): Promise<void> 
             eventId,
             triggerType: options.triggerType,
             automatic: Boolean(options.automatic),
-            blocker: invalidPostShapeReason
-                ? 'cloud_invalid_post_shape'
+            blocker: providerFailureReason === 'max_tokens'
+                ? 'max_tokens'
+                : providerFailureReason
+                    ? 'cloud_invalid_post_shape'
                 : skipReason === 'quota_exhausted'
                     ? 'quota_exhausted'
                     : skipReason === 'cloud_rate_limited'
@@ -1403,11 +1452,14 @@ async function runCloudDraftFlow(options: CloudDraftFlowOptions): Promise<void> 
             skipReason,
             cloudStatus: cloudErrorCode === 'QUOTA_EXCEEDED'
                 ? 'quota_exhausted'
-                : invalidPostShapeReason
+                : providerFailureReason
                     ? 'rejected'
                     : 'failed',
             postAccepted: false,
         });
+        if (options.automatic) {
+            recordAutomaticDraftFailure(autoEventKey);
+        }
         if (!options.automatic) {
             logError(`Post generation failed: ${message}`);
             vscode.window.showErrorMessage(`DevGhost: ${message}`);
@@ -1676,7 +1728,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // Deep work wrap-up: after the configured active-coding threshold, suggest a review-first draft
     session.onDeepWorkWrapUp(async () => {
         const workspaceRoot = resolveWorkspaceRoot() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
-        const eventKey = `deep-work:${workspaceRoot || 'workspace'}:${session.getSession().startTime.toISOString()}`;
+        const eventKey = buildOpaqueWorkspaceEventKey('deep-work', workspaceRoot, session.getSession().startTime.toISOString());
         if (!workspaceRoot) return;
         if (!await allowAutomaticDraft({
             trigger: 'DEEP_WORK_WRAP_UP',
@@ -2231,7 +2283,7 @@ async function handleCommitDetected(analysis: CommitAnalysis): Promise<void> {
     }
 
     // Phase 9: Evaluate if this commit is worth a draft
-    const eventKey = `commit:${analysis.repoRoot}:${analysis.hash}`;
+    const eventKey = buildOpaqueWorkspaceEventKey('commit', analysis.repoRoot, analysis.hash);
     if (!await allowAutomaticDraft({
         trigger: 'COMMIT_DETECTED',
         eventKey,

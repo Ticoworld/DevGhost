@@ -29,6 +29,9 @@ function countSelectedDiffExcerptChars(request: ReturnType<typeof parseDraftRequ
 export default async function handler(req: ApiRequestLike, res: ApiResponseLike): Promise<void> {
     const startedAt = Date.now();
     const method = (req.method ?? 'POST').toUpperCase();
+    let request: ReturnType<typeof parseDraftRequest> | null = null;
+    let clientVersion: string | undefined;
+    let quotaMode: 'normal' | 'qa' = 'normal';
 
     if (method !== 'POST') {
         rejectMethodNotAllowed(res);
@@ -36,7 +39,8 @@ export default async function handler(req: ApiRequestLike, res: ApiResponseLike)
     }
 
     try {
-        const request = parseDraftRequest(parseApiRequestBody(req));
+        request = parseDraftRequest(parseApiRequestBody(req));
+        clientVersion = request.clientVersion;
         const contextBytes = Buffer.byteLength(JSON.stringify(request), 'utf8');
         const excerptCount = request.selectedDiffExcerpts?.length ?? 0;
         const excerptChars = countSelectedDiffExcerptChars(request);
@@ -50,6 +54,7 @@ export default async function handler(req: ApiRequestLike, res: ApiResponseLike)
             getQuotaSnapshot(request.deviceId, request.clientVersion),
             buildRepetitionSnapshot(request.deviceId, request),
         ]);
+        quotaMode = quotaSnapshot.limit > 3 ? 'qa' : 'normal';
 
         if (!quotaSnapshot.canGenerate) {
             throw quotaExceeded();
@@ -92,8 +97,13 @@ export default async function handler(req: ApiRequestLike, res: ApiResponseLike)
             requestId: request.requestId,
             deviceId: request.deviceId,
             triggerType: request.triggerType,
+            clientVersion,
+            quotaMode,
             modelName: draft.modelName,
             retryAttempted,
+            finishReason: draft.finishReason ?? undefined,
+            visibleOutputTokens: draft.visibleOutputTokens ?? undefined,
+            thoughtsTokenCount: draft.thoughtsTokenCount ?? undefined,
             quotaRemaining: recorded.quota.remaining,
             quotaUsed: recorded.quota.used,
             contextBytes,
@@ -105,18 +115,30 @@ export default async function handler(req: ApiRequestLike, res: ApiResponseLike)
         sendJson(res, 200, response);
     } catch (error) {
         if (isApiError(error)) {
-            const invalidPostShapeReason = error.code === 'PROVIDER_ERROR' && typeof error.details?.reason === 'string'
-                ? error.details.reason
+            const details = error.details ?? {};
+            const retryAttempted = Boolean(details.retryAttempted);
+            const finishReason = typeof details.finishReason === 'string' ? details.finishReason : undefined;
+            const visibleOutputTokens = typeof details.visibleOutputTokens === 'number' ? details.visibleOutputTokens : undefined;
+            const thoughtsTokenCount = typeof details.thoughtsTokenCount === 'number' ? details.thoughtsTokenCount : undefined;
+            const invalidReason = typeof details.invalidReason === 'string' ? details.invalidReason : undefined;
+            const providerFailureReason = error.code === 'PROVIDER_ERROR' && typeof details.reason === 'string'
+                ? details.reason
                 : null;
             const meta = {
                 route: '/api/draft',
                 errorCode: error.code,
                 status: error.statusCode,
-                retryAttempted: Boolean(invalidPostShapeReason),
-                reason: invalidPostShapeReason ?? undefined,
+                clientVersion: clientVersion ?? request?.clientVersion,
+                quotaMode,
+                retryAttempted,
+                reason: providerFailureReason ?? undefined,
+                invalidReason,
+                finishReason,
+                visibleOutputTokens,
+                thoughtsTokenCount,
                 durationMs: Date.now() - startedAt,
             };
-            if (invalidPostShapeReason) {
+            if (providerFailureReason) {
                 logWarn('Draft request failed', meta);
             } else if (error.statusCode >= 500) {
                 logError('Draft request failed', meta);

@@ -134,10 +134,30 @@ function normalizeForAnalysis(value: string): string {
     text = text.replace(/^(?:draft|tweet|output):\s*/i, '').trim();
     text = text.replace(/%23/g, '#').replace(/%20/g, ' ');
     text = text.replace(/\s+/g, ' ');
-    if (text.length > MAX_DRAFT_TEXT_CHARS) {
-        text = text.slice(0, MAX_DRAFT_TEXT_CHARS).trimEnd();
+    if (text.length <= MAX_DRAFT_TEXT_CHARS) {
+        return text;
     }
-    return text;
+
+    for (let cut = MAX_DRAFT_TEXT_CHARS; cut > 0; cut--) {
+        const candidate = text.slice(0, cut).trimEnd();
+        if (!candidate) {
+            continue;
+        }
+
+        const previousChar = text[cut - 1] ?? '';
+        const nextChar = text[cut] ?? '';
+        if (/\S/.test(previousChar) && /\S/.test(nextChar)) {
+            continue;
+        }
+
+        if (hasUnmatchedBacktick(candidate)) {
+            continue;
+        }
+
+        return candidate;
+    }
+
+    return '';
 }
 
 function splitDraftTokens(text: string): string[] {
@@ -280,7 +300,7 @@ function looksLikeHeadlineOnly(text: string): boolean {
         return true;
     }
 
-    return countContentWords(words) < 4;
+    return countContentWords(words) < 3;
 }
 
 function looksCutOff(text: string): boolean {

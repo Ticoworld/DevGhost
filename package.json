@@ -2,7 +2,7 @@
   "name": "devghost",
   "displayName": "DevGhost: Build-in-Public",
   "description": "Cloud-first VS Code extension that watches real coding activity and suggests build-in-public drafts for review. Review-first. Never posts automatically.",
-  "version": "3.4.4",
+  "version": "3.4.5",
   "preview": true,
   "publisher": "ticoworld",
   "repository": {

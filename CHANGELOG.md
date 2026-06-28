@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.4.5 - Generation parity and reliability fix
+
+- Cloud generation now uses a larger output budget and structured JSON output so Gemini 3.x posts can finish cleanly instead of starving on reasoning tokens.
+- `MAX_TOKENS` now fails safely, retries once with corrected instructions, and never leaks fragments back to the extension.
+- Manual post generation now uses the same evidence-first prompt shape as commit-triggered Cloud drafts.
+- Automatic Cloud commit events are only marked handled after Cloud accepts a draft, and event keys no longer persist absolute repository roots.
+- Sanitization, repetition steering, diff excerpt selection, and short-post validation were tuned to preserve useful context and reduce false rejects.
+
 ## 3.4.4 - QA reliability build
 
 - Automatic Cloud draft attempts now leave a metadata-only decision record that can be inspected from the extension.

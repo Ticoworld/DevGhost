@@ -242,14 +242,17 @@ export class GitManager implements vscode.Disposable {
                 repoRoot,
                 ['show', '--stat', '--format=%H%x1f%s%x1f%aI%x1f%cI', commitHash]
             );
+            const nameStatusOutput = await this.runGitCommand(
+                repoRoot,
+                ['show', '--name-status', '--format=', '-M', commitHash]
+            );
 
             const lines = statsOutput.split(/\r?\n/);
             const headerLine = lines.shift() || '';
             const [fullHash = commitHash, message = 'No message', authorDate = null, committerDate = null] = headerLine.split('\x1f');
 
-            // Parse filenames from the stat lines
-            // Example line: " src/analyzer/gemini.ts | 24 ++++++++"
             const changedFiles: string[] = [];
+            const seenChangedFiles = new Set<string>();
             let additions = 0;
             let deletions = 0;
             let filesChanged = 0;
@@ -270,13 +273,26 @@ export class GitManager implements vscode.Disposable {
                     if (delMatch) deletions = parseInt(delMatch[1]);
                     continue;
                 }
+            }
 
-                // Stat line: " path/to/file | 10 ++--"
-                const pipeIdx = line.indexOf('|');
-                if (pipeIdx > 0) {
-                    const filePath = line.substring(0, pipeIdx).trim();
-                    if (filePath) changedFiles.push(filePath);
+            for (const rawLine of nameStatusOutput.split(/\r?\n/)) {
+                const line = rawLine.trim();
+                if (!line) continue;
+
+                const parts = line.split(/\t+/).map((part) => part.trim()).filter(Boolean);
+                if (parts.length < 2) continue;
+
+                const status = parts[0]?.toUpperCase() || '';
+                const filePath = status.startsWith('R') || status.startsWith('C')
+                    ? parts[2] || parts[1]
+                    : parts[1];
+
+                if (!filePath || seenChangedFiles.has(filePath)) {
+                    continue;
                 }
+
+                seenChangedFiles.add(filePath);
+                changedFiles.push(filePath);
             }
 
             // If summary line failed, use counts from parsed files

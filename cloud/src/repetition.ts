@@ -97,6 +97,62 @@ function inferTopicTag(request: DraftRequest): string {
     }
 }
 
+function inferCommitAngle(request: DraftRequest): string {
+    const evidenceBlob = [
+        request.commitEvidence?.commitMessage,
+        request.commitEvidence?.workType,
+        request.projectSummary,
+        request.currentFocus ?? '',
+        request.frictionSummary ?? '',
+        ...(request.commitMessages ?? []),
+        ...(request.changedRelativePaths ?? []),
+        ...(request.commitEvidence?.changedRelativePaths ?? []),
+        ...(request.activeSymbols ?? []),
+    ].join(' ').toLowerCase();
+
+    if (request.commitEvidence?.workType === 'tests' || /\b(test|tests|spec|vitest|jest|coverage)\b/i.test(evidenceBlob)) {
+        return 'tests';
+    }
+
+    if (request.commitEvidence?.workType === 'docs' || /\b(doc|docs|documentation|readme|changelog)\b/i.test(evidenceBlob)) {
+        return 'docs';
+    }
+
+    if (/\b(cli|command|doctor|status|terminal)\b/i.test(evidenceBlob)) {
+        return 'cli';
+    }
+
+    if (/\b(ui|ux|component|layout|screen|page|view)\b/i.test(evidenceBlob)) {
+        return 'ui';
+    }
+
+    if (/\b(memory|repetition|remember|draft angle)\b/i.test(evidenceBlob)) {
+        return 'memory';
+    }
+
+    if (request.commitEvidence?.workType === 'config' || /\b(config|setup|env|initialize)\b/i.test(evidenceBlob)) {
+        return 'setup';
+    }
+
+    if (request.commitEvidence?.workType === 'bugfix') {
+        return 'fix';
+    }
+
+    if (request.commitEvidence?.workType === 'feature') {
+        return 'shipping';
+    }
+
+    if (request.fileTypeSummary?.docsFiles && request.fileTypeSummary.docsFiles >= request.fileTypeSummary.sourceFiles) {
+        return 'docs';
+    }
+
+    if (request.fileTypeSummary?.styleFiles && request.fileTypeSummary.styleFiles > request.fileTypeSummary.sourceFiles) {
+        return 'ui';
+    }
+
+    return 'shipping';
+}
+
 function inferAngle(request: DraftRequest): string {
     if (request.triggerType === 'FRICTION_BREAKTHROUGH') return 'relief';
     if (request.triggerType === 'PROJECT_LAUNCH') return 'launch';
@@ -104,7 +160,7 @@ function inferAngle(request: DraftRequest): string {
     if (request.triggerType === 'DEEP_WORK_WRAP_UP') return 'momentum';
     if (request.triggerType === 'SILENCE_BREAKER') return 'grind';
     if (request.triggerType === 'FOCUS_INTENT') return 'intent';
-    if (request.triggerType === 'COMMIT_DETECTED') return 'shipping';
+    if (request.triggerType === 'COMMIT_DETECTED') return inferCommitAngle(request);
     return request.frictionSummary ? 'friction' : 'progress';
 }
 
@@ -135,8 +191,8 @@ export async function buildRepetitionSnapshot(deviceId: string, request: DraftRe
         ...memory.map((row) => row.angle),
     ].filter((value) => value !== angle);
     const score = computeScore(memory, topicTag, angle, request);
-    const repeatedPair = memory.some((row) => row.topic_tag === topicTag && row.angle === angle && row.success_count >= 2);
-    const shouldReject = repeatedPair && score >= 6;
+    const repeatedPair = memory.some((row) => row.topic_tag === topicTag && row.angle === angle && row.success_count >= 3);
+    const shouldReject = repeatedPair && score >= 8;
 
     return {
         topicTag,

@@ -30,6 +30,48 @@ export interface GeminiDraftResult {
     draftText: string;
     modelName: string;
     retryAttempted?: boolean;
+    finishReason?: string | null;
+    visibleOutputTokens?: number | null;
+    thoughtsTokenCount?: number | null;
+    totalTokenCount?: number | null;
+    promptTokenCount?: number | null;
+    structuredResponse?: boolean;
+}
+
+const POST_RESPONSE_SCHEMA = {
+    type: 'object',
+    properties: {
+        post: { type: 'string' },
+    },
+    required: ['post'],
+} as const;
+
+const SYSTEM_INSTRUCTION = [
+    'You are DevGhost, a developer ghostwriter with a calm, specific build-in-public voice.',
+    'Write one complete post from the evidence provided.',
+    'Return only valid JSON matching {"post":"..."} and nothing else.',
+    'Keep the post under 280 characters.',
+    'Use 1-2 complete sentences.',
+    'Be concrete: mention the actual change and the result.',
+    'Do not write headlines, bullets, labels, file paths, code fragments, or setup lines.',
+    'Do not invent details that are not supported by the evidence.',
+    'Sound human, direct, and natural.',
+].join('\n');
+
+type RetryReason = 'shape' | 'max_tokens';
+
+interface ResponseMetadata {
+    finishReason: string | null;
+    promptTokenCount: number | null;
+    visibleOutputTokens: number | null;
+    thoughtsTokenCount: number | null;
+    totalTokenCount: number | null;
+    modelVersion: string | null;
+}
+
+interface DraftAttemptResult extends ResponseMetadata {
+    text: string;
+    structuredResponse: boolean;
 }
 
 function assertGeminiKey(): string {
@@ -42,6 +84,133 @@ function assertGeminiKey(): string {
 
 function getModelName(): string {
     return process.env.GEMINI_MODEL?.trim() || DEFAULT_GEMINI_MODEL;
+}
+
+function buildThinkingConfig(modelName: string): Record<string, unknown> | undefined {
+    const normalized = modelName.trim().toLowerCase();
+    if (normalized.startsWith('gemini-3')) {
+        return {
+            thinkingLevel: 'low',
+        };
+    }
+
+    if (normalized.startsWith('gemini-2.5')) {
+        return {
+            thinkingBudget: 0,
+        };
+    }
+
+    return undefined;
+}
+
+function buildGenerationConfig(modelName: string, retryReason?: RetryReason): Record<string, unknown> {
+    const normalized = modelName.trim().toLowerCase();
+    const isGemini3x = normalized.startsWith('gemini-3');
+
+    const config: Record<string, unknown> = {
+        maxOutputTokens: 1024,
+        responseMimeType: 'application/json',
+        responseSchema: POST_RESPONSE_SCHEMA,
+    };
+
+    if (!isGemini3x) {
+        config.temperature = retryReason ? 0.55 : 0.65;
+        config.topP = 0.9;
+        config.candidateCount = 1;
+    }
+
+    const thinkingConfig = buildThinkingConfig(modelName);
+    if (thinkingConfig) {
+        config.thinkingConfig = thinkingConfig;
+    }
+
+    return config;
+}
+
+function buildRetryPromptNote(retryReason?: RetryReason): string[] {
+    if (!retryReason) {
+        return [];
+    }
+
+    if (retryReason === 'max_tokens') {
+        return [
+            'This is a retry after the previous attempt was cut off by the token limit.',
+            'Finish the thought cleanly in one or two complete sentences.',
+            'Do not start over with a headline or leave the sentence hanging.',
+            '',
+        ];
+    }
+
+    return [
+        'This is a retry after the previous attempt looked like a headline, setup line, or fragment.',
+        'Write one complete post with a concrete change and result.',
+        'Do not return a file path, filename, label, code token, or dangling backtick.',
+        '',
+    ];
+}
+
+function extractResponseMetadata(data: unknown): ResponseMetadata {
+    const candidate = data as {
+        candidates?: Array<{
+            finishReason?: string;
+        }>;
+        usageMetadata?: {
+            promptTokenCount?: number;
+            candidatesTokenCount?: number;
+            totalTokenCount?: number;
+            thoughtsTokenCount?: number;
+        };
+        modelVersion?: string;
+    };
+
+    return {
+        finishReason: candidate.candidates?.[0]?.finishReason ?? null,
+        promptTokenCount: candidate.usageMetadata?.promptTokenCount ?? null,
+        visibleOutputTokens: candidate.usageMetadata?.candidatesTokenCount ?? null,
+        thoughtsTokenCount: candidate.usageMetadata?.thoughtsTokenCount ?? null,
+        totalTokenCount: candidate.usageMetadata?.totalTokenCount ?? null,
+        modelVersion: candidate.modelVersion ?? null,
+    };
+}
+
+function extractCandidateText(data: unknown): string {
+    const candidate = data as {
+        candidates?: Array<{
+            content?: {
+                parts?: Array<{ text?: string }>;
+            };
+        }>;
+    };
+
+    return candidate.candidates?.[0]?.content?.parts?.map((part) => part.text ?? '').join('')?.trim() ?? '';
+}
+
+function parseStructuredPost(text: string): { text: string; structuredResponse: boolean } {
+    const trimmed = text.trim();
+    if (!trimmed) {
+        return { text: '', structuredResponse: false };
+    }
+
+    try {
+        const parsed = JSON.parse(trimmed) as unknown;
+        if (typeof parsed === 'string') {
+            return { text: parsed.trim(), structuredResponse: true };
+        }
+
+        if (parsed && typeof parsed === 'object') {
+            const post = (parsed as { post?: unknown }).post;
+            if (typeof post === 'string') {
+                return { text: post.trim(), structuredResponse: true };
+            }
+        }
+    } catch {
+        // Fall through to the raw text fallback below.
+    }
+
+    return {
+        text: trimmed,
+        structuredResponse: false,
+    };
 }
 
 function renderFileTypeSummary(request: DraftRequest): string {
@@ -83,16 +252,6 @@ function renderCommitEvidence(evidence: CommitEvidence | undefined): string {
     const changedRelativePaths = renderList(evidence.changedRelativePaths, MAX_CHANGED_PATH_CHARS);
     const signalReasons = renderList(evidence.signalReasons?.slice(0, MAX_COMMIT_EVIDENCE_REASONS), MAX_COMMIT_EVIDENCE_REASON_CHARS);
     const gateReasons = renderList(evidence.gateReasons?.slice(0, MAX_COMMIT_EVIDENCE_REASONS), MAX_COMMIT_EVIDENCE_REASON_CHARS);
-    const selectedDiffExcerpts = (evidence.selectedDiffExcerpts ?? [])
-        .slice(0, MAX_SELECTED_DIFF_EXCERPTS)
-        .map((excerpt, index) => {
-            const label = excerpt.label ? ` (${redactTextForPrompt(excerpt.label).slice(0, MAX_DIFF_EXCERPT_LABEL_CHARS)})` : '';
-            const path = redactTextForPrompt(excerpt.path).slice(0, MAX_DIFF_EXCERPT_PATH_CHARS);
-            const body = redactTextForPrompt(excerpt.excerpt).slice(0, MAX_DIFF_EXCERPT_CHARS);
-            return [`EXCERPT ${index + 1}${label}`, `path: ${path}`, body].join('\n');
-        })
-        .join('\n\n')
-        .slice(0, MAX_TOTAL_DIFF_EXCERPT_CHARS);
 
     return [
         'commitEvidence (transient only):',
@@ -107,14 +266,12 @@ function renderCommitEvidence(evidence: CommitEvidence | undefined): string {
         gateReasons,
         `diffExcerptCount: ${diffExcerptCount}`,
         `diffExcerptChars: ${diffExcerptChars}`,
-        `selectedDiffExcerpts:`,
-        selectedDiffExcerpts || '(none)',
         `supportingChangedRelativePaths:`,
         changedRelativePaths,
     ].join('\n');
 }
 
-function renderPrompt(request: DraftRequest, repetition: RepetitionSnapshot, options?: { retryAttempted?: boolean }): string {
+function renderPrompt(request: DraftRequest, repetition: RepetitionSnapshot, options?: { retryAttempted?: boolean; retryReason?: RetryReason }): string {
     const diffExcerpts = (request.selectedDiffExcerpts ?? [])
         .slice(0, MAX_SELECTED_DIFF_EXCERPTS)
         .map((excerpt, index) => {
@@ -144,53 +301,53 @@ function renderPrompt(request: DraftRequest, repetition: RepetitionSnapshot, opt
     const contextBytes = Buffer.byteLength(JSON.stringify(request), 'utf8');
     const estimatedBytes = Math.min(contextBytes, MAX_REQUEST_CONTEXT_BYTES);
     const sessionDuration = request.sessionDurationMinutes ?? '(not provided)';
+    const commitEvidenceBlock = renderCommitEvidence(request.commitEvidence);
+    const retryNote = buildRetryPromptNote(options?.retryReason);
+    const examples = [
+        'Good examples of the shape:',
+        '- Got the backup panel aligned with real restore behavior. The UI now matches what backups can actually do.',
+        '- Added repetition memory so the same angle does not keep resurfacing across sessions.',
+        '- Tightened the CLI doctor/status path and added tests so the checks are easier to trust.',
+    ];
 
     return [
         'You are DevGhost Cloud.',
-        'Write one short human draft for a developer sharing progress.',
-        'Return only the draft text.',
+        'Write one complete build-in-public post for a developer sharing progress.',
+        'Return only valid JSON matching {"post":"..."} and nothing else.',
         'Keep it under 280 characters.',
+        'Use 1-2 complete sentences.',
         'Do not mention that you are an AI.',
         'Do not mention internal rules, logging, or hidden metadata.',
         'Prefer a specific, fresh angle over a generic recap.',
-        'If commit evidence is present, use it first and mention one concrete change or result from it.',
+        'If commit evidence is present, use it first even for MANUAL_INTENT requests.',
+        'Commit evidence overrides stale focus or project summary when they conflict.',
+        'Mention one concrete change and one concrete result when possible.',
         'Do not write a headline, setup line, or vague status note.',
+        'Do not write bullets, labels, file paths, code fragments, or dangling backticks.',
         'Do not repeat the recent topics or angles if you can avoid it.',
-        'Never output only a file path, filename, code symbol, heading, or label.',
-        'Do not end inside a code token or leave a dangling backtick.',
-        'Write a natural-language post.',
+        'Write a natural-language post with a concrete outcome.',
+        ...retryNote,
         ...(options?.retryAttempted
             ? [
-                'This is a retry.',
-                'The last output was invalid because it was a headline, setup line, or fragment instead of a concrete post.',
-                'Do not return a file path, filename, heading, label, code token, dangling backtick, cut-off fragment, or vague status note.',
-                'Write exactly one natural-language sentence about a concrete change or result.',
-                '',
+                'Do not end mid-sentence.',
             ]
             : []),
         '',
-        ...(request.triggerType === 'COMMIT_DETECTED'
-            ? [
-                'This is a commit-triggered post.',
-                'Use the commit message, work type, additions/deletions, signal reasons, gate reasons, and diff excerpt summary first.',
-                'Treat changed file paths as supporting evidence only.',
-                'Mention one concrete change from the provided commit evidence or diff excerpts.',
-                'Avoid generic openings like "Just shipped...", "Made some updates...", "Improved the app...", "Working on the project...", and "Pushed some changes."',
-                'Do not invent details that are not present in the evidence.',
-                '',
-            ]
-            : []),
+        ...examples,
+        '',
         `triggerType: ${request.triggerType}`,
-        `projectName: ${projectName}`,
-        `projectSummary: ${projectSummary}`,
-        `currentFocus: ${currentFocus}`,
-        `sessionDurationMinutes: ${sessionDuration}`,
         `commitEvidence:`,
-        renderCommitEvidence(request.commitEvidence),
+        commitEvidenceBlock,
+        `selectedDiffExcerpts (transient only):`,
+        diffExcerpts || '(none)',
         `commitMessages:`,
         commitMessages,
         `supportingChangedRelativePathCount: ${changedPathCount}`,
         `fileTypeSummary: ${renderFileTypeSummary(request)}`,
+        `projectName: ${projectName}`,
+        `projectSummary: ${projectSummary}`,
+        `currentFocus: ${currentFocus}`,
+        `sessionDurationMinutes: ${sessionDuration}`,
         `activeSymbols:`,
         activeSymbols,
         `failedCommandNames:`,
@@ -198,8 +355,6 @@ function renderPrompt(request: DraftRequest, repetition: RepetitionSnapshot, opt
         `successfulCommandNames:`,
         successfulCommands,
         `frictionSummary: ${frictionSummary}`,
-        `selectedDiffExcerpts (transient only):`,
-        diffExcerpts || '(none)',
         `recentTopicTags: ${recentTopicTags}`,
         `recentAngles: ${recentAngles}`,
         `avoidTopics: ${avoidTopics}`,
@@ -208,28 +363,14 @@ function renderPrompt(request: DraftRequest, repetition: RepetitionSnapshot, opt
         phrasesToAvoid,
         `contextBytes: ${estimatedBytes}`,
         '',
-        'Write the draft now.',
+        'Write the final post now.',
     ].join('\n');
 }
 
-function extractTextFromResponse(data: unknown): string {
-    const candidate = data as {
-        candidates?: Array<{
-            content?: {
-                parts?: Array<{ text?: string }>;
-            };
-        }>;
-        error?: unknown;
-    };
-
-    const text = candidate.candidates?.[0]?.content?.parts?.map((part) => part.text ?? '').join('') ?? '';
-    return text.trim();
-}
-
-async function requestDraft(request: DraftRequest, repetition: RepetitionSnapshot, commitRetry = false): Promise<string> {
+async function requestDraft(request: DraftRequest, repetition: RepetitionSnapshot, retryReason?: RetryReason): Promise<DraftAttemptResult> {
     const apiKey = assertGeminiKey();
     const modelName = getModelName();
-    const prompt = renderPrompt(request, repetition, { retryAttempted: commitRetry });
+    const prompt = renderPrompt(request, repetition, { retryAttempted: Boolean(retryReason), retryReason });
     const controller = new AbortController();
     const timeoutMs = 25_000;
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -244,19 +385,17 @@ async function requestDraft(request: DraftRequest, repetition: RepetitionSnapsho
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({
+                    systemInstruction: {
+                        role: 'system',
+                        parts: [{ text: SYSTEM_INSTRUCTION }],
+                    },
                     contents: [
                         {
                             role: 'user',
                             parts: [{ text: prompt }],
                         },
                     ],
-                    generationConfig: {
-                        temperature: commitRetry
-                            ? (request.triggerType === 'COMMIT_DETECTED' ? 0.45 : 0.65)
-                            : (request.triggerType === 'COMMIT_DETECTED' ? 0.65 : 0.8),
-                        topP: 0.95,
-                        maxOutputTokens: 160,
-                    },
+                    generationConfig: buildGenerationConfig(modelName, retryReason),
                 }),
             }
         );
@@ -272,7 +411,13 @@ async function requestDraft(request: DraftRequest, repetition: RepetitionSnapsho
         }
 
         const data = await response.json();
-        return cleanDraftText(extractTextFromResponse(data));
+        const metadata = extractResponseMetadata(data);
+        const parsed = parseStructuredPost(extractCandidateText(data));
+        return {
+            ...metadata,
+            text: parsed.text,
+            structuredResponse: parsed.structuredResponse,
+        };
     } catch (error) {
         if (error instanceof DOMException && error.name === 'AbortError') {
             throw upstreamTimeout('Gemini timed out.');
@@ -285,27 +430,106 @@ async function requestDraft(request: DraftRequest, repetition: RepetitionSnapsho
 
 export async function generateDraft(request: DraftRequest, repetition: RepetitionSnapshot): Promise<GeminiDraftResult> {
     const modelName = getModelName();
-    const firstDraft = await requestDraft(request, repetition, false);
-    const firstFailure = classifyDraftShapeFailure(firstDraft);
-    if (firstFailure === null) {
+    const firstDraft = await requestDraft(request, repetition);
+    if (firstDraft.finishReason === 'MAX_TOKENS') {
+        const retryDraft = await requestDraft(request, repetition, 'max_tokens');
+        if (retryDraft.finishReason === 'MAX_TOKENS') {
+            throw providerError('Gemini returned a truncated draft.', {
+                reason: 'max_tokens',
+                retryAttempted: true,
+                finishReason: retryDraft.finishReason,
+                visibleOutputTokens: retryDraft.visibleOutputTokens,
+                thoughtsTokenCount: retryDraft.thoughtsTokenCount,
+                totalTokenCount: retryDraft.totalTokenCount,
+                promptTokenCount: retryDraft.promptTokenCount,
+                modelName,
+            });
+        }
+
+        const cleanedRetry = cleanDraftText(retryDraft.text);
+        const retryFailure = classifyDraftShapeFailure(cleanedRetry);
+        if (retryFailure !== null) {
+            throw providerError('Gemini returned an invalid post shape.', {
+                reason: toInvalidPostShapeReasonCode(retryFailure),
+                invalidReason: retryFailure,
+                retryAttempted: true,
+                finishReason: retryDraft.finishReason,
+                visibleOutputTokens: retryDraft.visibleOutputTokens,
+                thoughtsTokenCount: retryDraft.thoughtsTokenCount,
+                totalTokenCount: retryDraft.totalTokenCount,
+                promptTokenCount: retryDraft.promptTokenCount,
+                modelName,
+            });
+        }
+
         return {
-            draftText: firstDraft,
+            draftText: cleanedRetry,
             modelName,
-            retryAttempted: false,
+            retryAttempted: true,
+            finishReason: retryDraft.finishReason,
+            visibleOutputTokens: retryDraft.visibleOutputTokens,
+            thoughtsTokenCount: retryDraft.thoughtsTokenCount,
+            totalTokenCount: retryDraft.totalTokenCount,
+            promptTokenCount: retryDraft.promptTokenCount,
+            structuredResponse: retryDraft.structuredResponse,
         };
     }
 
-    const retryDraft = await requestDraft(request, repetition, true);
-    const retryFailure = classifyDraftShapeFailure(retryDraft);
+    const firstCleaned = cleanDraftText(firstDraft.text);
+    const firstFailure = classifyDraftShapeFailure(firstCleaned);
+    if (firstFailure === null) {
+        return {
+            draftText: firstCleaned,
+            modelName,
+            retryAttempted: false,
+            finishReason: firstDraft.finishReason,
+            visibleOutputTokens: firstDraft.visibleOutputTokens,
+            thoughtsTokenCount: firstDraft.thoughtsTokenCount,
+            totalTokenCount: firstDraft.totalTokenCount,
+            promptTokenCount: firstDraft.promptTokenCount,
+            structuredResponse: firstDraft.structuredResponse,
+        };
+    }
+
+    const retryDraft = await requestDraft(request, repetition, 'shape');
+    if (retryDraft.finishReason === 'MAX_TOKENS') {
+        throw providerError('Gemini returned a truncated draft.', {
+            reason: 'max_tokens',
+            retryAttempted: true,
+            finishReason: retryDraft.finishReason,
+            visibleOutputTokens: retryDraft.visibleOutputTokens,
+            thoughtsTokenCount: retryDraft.thoughtsTokenCount,
+            totalTokenCount: retryDraft.totalTokenCount,
+            promptTokenCount: retryDraft.promptTokenCount,
+            modelName,
+        });
+    }
+
+    const retryCleaned = cleanDraftText(retryDraft.text);
+    const retryFailure = classifyDraftShapeFailure(retryCleaned);
     if (retryFailure !== null) {
         throw providerError('Gemini returned an invalid post shape.', {
             reason: toInvalidPostShapeReasonCode(retryFailure),
+            invalidReason: retryFailure,
+            retryAttempted: true,
+            finishReason: retryDraft.finishReason,
+            visibleOutputTokens: retryDraft.visibleOutputTokens,
+            thoughtsTokenCount: retryDraft.thoughtsTokenCount,
+            totalTokenCount: retryDraft.totalTokenCount,
+            promptTokenCount: retryDraft.promptTokenCount,
+            modelName,
         });
     }
 
     return {
-        draftText: retryDraft,
+        draftText: retryCleaned,
         modelName,
         retryAttempted: true,
+        finishReason: retryDraft.finishReason,
+        visibleOutputTokens: retryDraft.visibleOutputTokens,
+        thoughtsTokenCount: retryDraft.thoughtsTokenCount,
+        totalTokenCount: retryDraft.totalTokenCount,
+        promptTokenCount: retryDraft.promptTokenCount,
+        structuredResponse: retryDraft.structuredResponse,
     };
 }

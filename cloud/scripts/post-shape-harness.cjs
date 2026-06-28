@@ -131,6 +131,7 @@ async function main() {
     assert.equal(classifyDraftShapeFailure('Just wired up repetition memory'), 'headline_only');
 
     assert.equal(classifyDraftShapeFailure('Fixed the memo review flow.'), null);
+    assert.equal(classifyDraftShapeFailure('Backups now work.'), null);
     assert.equal(classifyDraftShapeFailure('Tightened the operator CLI output and added tests around the doctor/status path.'), null);
 
     process.env.GEMINI_API_KEY = 'test-key';
@@ -156,6 +157,31 @@ async function main() {
     const retrySuccess = await generateDraft(makeRequest(), makeRepetition());
     assert.equal(retrySuccess.draftText, 'Fixed the memo review flow.');
     assert.equal(retrySuccess.retryAttempted, true);
+
+    global.fetch = async () => ({
+        ok: true,
+        json: async () => ({
+            candidates: [
+                {
+                    finishReason: 'MAX_TOKENS',
+                    content: {
+                        parts: [{ text: '3.4.4 with' }],
+                    },
+                    usageMetadata: {
+                        promptTokenCount: 12,
+                        candidatesTokenCount: 6,
+                        totalTokenCount: 158,
+                        thoughtsTokenCount: 140,
+                    },
+                },
+            ],
+        }),
+    });
+
+    await assert.rejects(
+        () => generateDraft(makeRequest(), makeRepetition()),
+        (error) => Boolean(error && typeof error === 'object' && 'details' in error && error.details && error.details.reason === 'max_tokens')
+    );
 
     global.fetch = async () => ({
         ok: true,
