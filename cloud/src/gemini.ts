@@ -24,7 +24,7 @@ import {
 import { providerError, providerRateLimited, upstreamTimeout } from './errors';
 import { redactTextForPrompt } from './redaction';
 import type { RepetitionSnapshot } from './repetition';
-import { classifyDraftShapeFailure, cleanDraftText } from './postShape';
+import { classifyDraftShapeFailure, cleanDraftText, toInvalidPostShapeReasonCode } from './postShape';
 
 export interface GeminiDraftResult {
     draftText: string;
@@ -154,11 +154,14 @@ function renderPrompt(request: DraftRequest, repetition: RepetitionSnapshot, opt
         'Do not mention internal rules, logging, or hidden metadata.',
         'Prefer a specific, fresh angle over a generic recap.',
         'Do not repeat the recent topics or angles if you can avoid it.',
-        'Never output only a file path, filename, code symbol, heading, or label. Write a natural-language post.',
+        'Never output only a file path, filename, code symbol, heading, or label.',
+        'Do not end inside a code token or leave a dangling backtick.',
+        'Write a natural-language post.',
         ...(options?.retryAttempted
             ? [
-                'This is a retry. The last output was invalid because it was not a post.',
-                'Do not return a file path, filename, heading, label, or code token.',
+                'This is a retry.',
+                'The last output was invalid because it was not a post.',
+                'Do not return a file path, filename, heading, label, code token, dangling backtick, or cut-off fragment.',
                 'Write exactly one natural-language sentence about the concrete change or update.',
                 '',
             ]
@@ -293,7 +296,9 @@ export async function generateDraft(request: DraftRequest, repetition: Repetitio
     const retryDraft = await requestDraft(request, repetition, true);
     const retryFailure = classifyDraftShapeFailure(retryDraft);
     if (retryFailure !== null) {
-        throw providerError('Gemini returned an invalid post shape.');
+        throw providerError('Gemini returned an invalid post shape.', {
+            reason: toInvalidPostShapeReasonCode(retryFailure),
+        });
     }
 
     return {

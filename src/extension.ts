@@ -11,7 +11,7 @@ import { formatCloudErrorMessage } from './cloud/errors';
 import { getOrCreateCloudDeviceId } from './cloud/deviceId';
 import { CloudQuotaState } from './cloud/quotaState';
 import { CloudRepetitionMemory, type RepetitionSnapshot } from './cloud/repetitionMemory';
-import type { CommitEvidence, DismissReason, FeedbackType, TriggerType } from './cloud/contracts';
+import type { CommitEvidence, DismissReason, FeedbackType, QuotaSnapshot, TriggerType } from './cloud/contracts';
 
 /**
  * DevGhost 2.0 - Session-Based "Build in Public" Automation
@@ -147,6 +147,36 @@ function logDebug(message: string): void {
 
 function logError(message: string): void {
     outputChannel?.appendLine(`[error] ${message}`);
+}
+
+const QUOTA_RESET_TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+});
+
+function formatQuotaResetTime(resetAtUtc: string): string {
+    const resetAt = new Date(resetAtUtc);
+    if (Number.isNaN(resetAt.getTime())) {
+        return resetAtUtc;
+    }
+
+    return QUOTA_RESET_TIME_FORMATTER.format(resetAt);
+}
+
+async function showQuotaLimitReachedNotice(deviceId: string, quota: QuotaSnapshot, automatic?: boolean): Promise<void> {
+    const resetAt = formatQuotaResetTime(quota.resetAtUtc);
+    const message = `Post limit reached. New posts available after ${resetAt}.`;
+
+    if (automatic) {
+        const shouldShow = await cloudQuotaState?.shouldShowQuotaLimitReachedNotice(deviceId, quota.resetAtUtc) ?? true;
+        if (!shouldShow) {
+            logDebug(`Post generation skipped: quota exhausted until ${resetAt}.`);
+            return;
+        }
+    }
+
+    logStatus(`Post limit reached until ${resetAt}.`);
+    await vscode.window.showInformationMessage(message);
 }
 
 function buildCloudBaselineSummary(scan: string): string {
@@ -993,11 +1023,7 @@ async function runCloudDraftFlow(options: CloudDraftFlowOptions): Promise<void> 
 
         await cloudQuotaState?.setCachedQuota(deviceId, quotaResponse.quota);
         if (!quotaResponse.quota.canGenerate) {
-            if (!options.automatic) {
-                vscode.window.showInformationMessage('Post limit reached for the last 24 hours.');
-            } else {
-                logDebug('Post generation skipped: quota exhausted.');
-            }
+            await showQuotaLimitReachedNotice(deviceId, quotaResponse.quota, options.automatic);
             return;
         }
 
@@ -1221,7 +1247,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     outputChannel = vscode.window.createOutputChannel('DevGhost Logs');
     context.subscriptions.push(outputChannel);
 
-    const version = context.extension.packageJSON.version || '3.4.0';
+    const version = context.extension.packageJSON.version || '3.4.3';
     logStatus(`DevGhost ${version} started.`);
 
     // Initialize the Context Manager (The Brain) — uses workspaceState only

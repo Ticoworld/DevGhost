@@ -105,16 +105,18 @@ export default async function handler(req: ApiRequestLike, res: ApiResponseLike)
         sendJson(res, 200, response);
     } catch (error) {
         if (isApiError(error)) {
-            const invalidPostShape = error.code === 'PROVIDER_ERROR' && /invalid post shape/i.test(error.message);
+            const invalidPostShapeReason = error.code === 'PROVIDER_ERROR' && typeof error.details?.reason === 'string'
+                ? error.details.reason
+                : null;
             const meta = {
                 route: '/api/draft',
                 errorCode: error.code,
                 status: error.statusCode,
-                retryAttempted: invalidPostShape,
-                reason: invalidPostShape ? 'invalid_post_shape' : undefined,
+                retryAttempted: Boolean(invalidPostShapeReason),
+                reason: invalidPostShapeReason ?? undefined,
                 durationMs: Date.now() - startedAt,
             };
-            if (invalidPostShape) {
+            if (invalidPostShapeReason) {
                 logWarn('Draft request failed', meta);
             } else if (error.statusCode >= 500) {
                 logError('Draft request failed', meta);

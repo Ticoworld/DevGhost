@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.4.3 - Quota and post-shape hardening
+
+- Automatic post suggestions now show a calm quota notice once per rolling window instead of going silent.
+- Manual post generation still shows quota status clearly when the limit is reached.
+- Cloud now rejects malformed post text with dangling backticks, cut-off code fragments, and path-only outputs.
+- Invalid post shapes retry once with stricter instructions and then fail safely if they still do not produce a real post.
+- The release version was bumped to keep this package distinct from the 3.4.2 test build.
+
 ## 3.4.2 - Commit evidence quality fix
 
 - Commit-triggered Cloud posts now receive concrete commit evidence before generation.

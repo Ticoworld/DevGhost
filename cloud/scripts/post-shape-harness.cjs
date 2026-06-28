@@ -27,7 +27,7 @@ function makeRequest() {
     return {
         deviceId: '11111111-1111-4111-8111-111111111111',
         requestId: '22222222-2222-4222-8222-222222222222',
-        clientVersion: '3.4.2',
+        clientVersion: '3.4.3',
         triggerType: 'COMMIT_DETECTED',
         projectName: 'SalesMemo',
         projectSummary: 'SalesMemo helps the team review payment-question workflows.',
@@ -101,19 +101,38 @@ function makeRepetition() {
 }
 
 async function main() {
-    assert.equal(classifyDraftShapeFailure('src/app/'), 'path_or_filename_only');
-    assert.equal(classifyDraftShapeFailure('`src/app/`'), 'path_or_filename_only');
-    assert.equal(classifyDraftShapeFailure('smart-entry.tsx'), 'path_or_filename_only');
-    assert.equal(classifyDraftShapeFailure('package.json'), 'path_or_filename_only');
-    assert.equal(classifyDraftShapeFailure('smartEntryReviewCanvas'), 'identifier_only');
-    assert.equal(classifyDraftShapeFailure('Just shipped the operator'), 'generic_commit_filler');
+    const invalidCases = [
+        ['src/app/', 'path_or_filename_only'],
+        ['`src/app/`', 'path_or_filename_only'],
+        ['smart-entry.tsx', 'path_or_filename_only'],
+        ['package.json', 'path_or_filename_only'],
+        ['Updated src/app', 'path_or_filename_only'],
+        ['Just shipped the operator', 'generic_commit_filler'],
+        ['Added an operator CLI to `ver`', 'code_span_terminal'],
+        ['Added support for `operator`', 'code_span_terminal'],
+        ['Added an operator CLI to ver.', 'cut_off_fragment'],
+        ['Added an operator CLI to ver', 'cut_off_fragment'],
+        ['Tightened the review hand', 'cut_off_fragment'],
+        ['I tightened the handoff logic for', 'cut_off_fragment'],
+        [', 21 deletions).', 'cut_off_fragment'],
+    ];
+
+    for (const [value, reason] of invalidCases) {
+        assert.equal(classifyDraftShapeFailure(value), reason, value);
+    }
+
+    assert.equal(classifyDraftShapeFailure('Updated `src/app`'), 'path_or_filename_only');
+    assert.equal(classifyDraftShapeFailure('Refactored the `smart`'), 'code_span_terminal');
+    assert.equal(classifyDraftShapeFailure('Added an operator CLI to ver.'), 'cut_off_fragment');
+
     assert.equal(classifyDraftShapeFailure('Fixed the memo review flow.'), null);
+    assert.equal(classifyDraftShapeFailure('Tightened the operator CLI output and added tests around the doctor/status path.'), null);
 
     process.env.GEMINI_API_KEY = 'test-key';
 
     let callCount = 0;
     global.fetch = async () => {
-        const text = callCount === 0 ? 'src/app/' : 'Fixed the memo review flow.';
+        const text = callCount === 0 ? 'Added an operator CLI to `ver`' : 'Fixed the memo review flow.';
         callCount += 1;
         return {
             ok: true,
@@ -133,22 +152,18 @@ async function main() {
     assert.equal(retrySuccess.draftText, 'Fixed the memo review flow.');
     assert.equal(retrySuccess.retryAttempted, true);
 
-    callCount = 0;
-    global.fetch = async () => {
-        callCount += 1;
-        return {
-            ok: true,
-            json: async () => ({
-                candidates: [
-                    {
-                        content: {
-                            parts: [{ text: 'Just shipped the operator' }],
-                        },
+    global.fetch = async () => ({
+        ok: true,
+        json: async () => ({
+            candidates: [
+                {
+                    content: {
+                        parts: [{ text: 'src/app/' }],
                     },
-                ],
-            }),
-        };
-    };
+                },
+            ],
+        }),
+    });
 
     await assert.rejects(
         () => generateDraft(makeRequest(), makeRepetition()),
